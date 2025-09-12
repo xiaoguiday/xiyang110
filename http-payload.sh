@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 默认端口
-WSS_PORT=80
+payload_PORT=80
 UDPGW_PORT=7300
 STUNNEL_PORT=443
 
