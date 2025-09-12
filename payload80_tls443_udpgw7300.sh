@@ -7,7 +7,7 @@ set -e
 read -p "请输入 WSS 监听端口（默认80）: " WSS_PORT
 WSS_PORT=${WSS_PORT:-80}
 
-read -p "请输入 TUNNEL4(Stunnel4) 端口（默认443）: " STUNNEL_PORT
+read -p "请输入 Stunnel4 端口（默认443）: " STUNNEL_PORT
 STUNNEL_PORT=${STUNNEL_PORT:-443}
 
 read -p "请输入 UDPGW 端口（默认7300）: " UDPGW_PORT
@@ -28,7 +28,7 @@ echo "----------------------------------"
 echo "==== 安装 WSS 脚本 ===="
 sudo tee /usr/local/bin/wss > /dev/null <<'EOF'
 #!/usr/bin/python3
-import socket, threading, select, sys, time, getopt
+import socket, threading, select, sys, time
 
 LISTENING_ADDR = '0.0.0.0'
 LISTENING_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
@@ -292,7 +292,7 @@ cd /root/badvpn/badvpn-build
 cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
 make -j$(nproc)
 
-# 创建 systemd 服务
+# 创建 systemd 服务（修正可执行文件名）
 sudo tee /etc/systemd/system/udpgw.service > /dev/null <<EOF
 [Unit]
 Description=UDP Gateway (Badvpn)
@@ -300,7 +300,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/root/badvpn/badvpn-build/udpgw --listen-addr 0.0.0.0:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
+ExecStart=/root/badvpn/badvpn-build/badvpn-udpgw --listen-addr 0.0.0.0:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
 Restart=on-failure
 User=root
 
