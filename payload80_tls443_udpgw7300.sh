@@ -292,7 +292,7 @@ cd /root/badvpn/badvpn-build
 cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
 make -j$(nproc)
 
-# 创建 systemd 服务（修正可执行文件名）
+# 创建 systemd 服务（修正绑定地址为 127.0.0.1）
 sudo tee /etc/systemd/system/udpgw.service > /dev/null <<EOF
 [Unit]
 Description=UDP Gateway (Badvpn)
@@ -300,7 +300,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/root/badvpn/badvpn-build/badvpn-udpgw --listen-addr 0.0.0.0:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
+ExecStart=/root/badvpn/badvpn-build/udpgw/badvpn-udpgw --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
 Restart=on-failure
 User=root
 
