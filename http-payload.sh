@@ -1,55 +1,63 @@
 #!/bin/bash
 
-set -e
+# -----------------------------
+# 一键安装脚本 (Ubuntu)
+# WSS + UDPGW + TUNNEL4
+# -----------------------------
 
-# ------------------------------
 # 默认端口
 DEFAULT_WSS_PORT=80
 DEFAULT_TUNNEL4_PORT=443
 DEFAULT_UDPGW_PORT=7300
 
-# ------------------------------
-# 读取用户自定义端口
-read -p "请输入 WSS 端口 [默认 $DEFAULT_WSS_PORT]: " WSS_PORT
+# 读取用户输入端口
+read -p "请输入 WSS 监听端口 [默认: $DEFAULT_WSS_PORT]: " WSS_PORT
 WSS_PORT=${WSS_PORT:-$DEFAULT_WSS_PORT}
 
-read -p "请输入 Tunnel4 端口 [默认 $DEFAULT_TUNNEL4_PORT]: " TUNNEL4_PORT
+read -p "请输入 TUNNEL4 监听端口 [默认: $DEFAULT_TUNNEL4_PORT]: " TUNNEL4_PORT
 TUNNEL4_PORT=${TUNNEL4_PORT:-$DEFAULT_TUNNEL4_PORT}
 
-read -p "请输入 UDPGW 端口 [默认 $DEFAULT_UDPGW_PORT]: " UDPGW_PORT
+read -p "请输入 UDPGW 监听端口 [默认: $DEFAULT_UDPGW_PORT]: " UDPGW_PORT
 UDPGW_PORT=${UDPGW_PORT:-$DEFAULT_UDPGW_PORT}
 
-echo "WSS 端口: $WSS_PORT"
-echo "Tunnel4 端口: $TUNNEL4_PORT"
-echo "UDPGW 端口: $UDPGW_PORT"
+# 等待 apt 解锁函数
+wait_for_apt() {
+    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        echo "等待 apt 解锁中..."
+        sleep 3
+    done
+}
 
-# ------------------------------
-# 更新系统 & 安装 Python3
-echo "安装 Python3..."
-if ! command -v python3 &> /dev/null; then
-    apt-get update
-    apt-get install -y python3 python3-pip
-fi
+# 安装依赖
+install_packages() {
+    wait_for_apt
+    echo "更新系统..."
+    sudo apt update -y || { echo "apt update 失败"; exit 1; }
 
-# ------------------------------
-# 安装 WSS
-echo "安装 WSS..."
-mkdir -p /usr/local/bin
-cat >/usr/local/bin/wss <<'EOF'
+    wait_for_apt
+    echo "安装 Python3、pip、wget、curl、git 等依赖..."
+    sudo apt install -y python3 python3-pip wget curl git net-tools || { echo "安装依赖失败"; exit 1; }
+
+    echo "依赖安装完成"
+}
+
+# 创建 WSS 脚本
+create_wss_script() {
+    echo "创建 WSS 脚本..."
+    cat >/usr/local/bin/wss <<EOF
 #!/usr/bin/python3
 import socket, threading, select, sys, time
 
 LISTENING_ADDR = '0.0.0.0'
-LISTENING_PORT = int(sys.argv[1]) if len(sys.argv)>1 else 80
-
+LISTENING_PORT = $WSS_PORT
 BUFLEN = 4096*4
 TIMEOUT = 60
 DEFAULT_HOST = '127.0.0.1:22'
-RESPONSE = 'HTTP/1.1 101 Switching Protocols\r\nContent-Length: 104857600000\r\n\r\n'
+RESPONSE = 'HTTP/1.1 101 Switching Protocols\\r\\nContent-Length: 104857600000\\r\\n\\r\\n'
 
 class Server(threading.Thread):
     def __init__(self, host, port):
-        super().__init__()
+        threading.Thread.__init__(self)
         self.running = False
         self.host = host
         self.port = port
@@ -89,51 +97,53 @@ class Server(threading.Thread):
 
     def removeConn(self, conn):
         with self.threadsLock:
-            if conn in self.threads:
-                self.threads.remove(conn)
+            self.threads.remove(conn)
 
     def close(self):
-        self.running = False
         with self.threadsLock:
             threads = list(self.threads)
             for c in threads:
                 c.close()
+        self.running = False
 
 class ConnectionHandler(threading.Thread):
     def __init__(self, socClient, server, addr):
-        super().__init__()
+        threading.Thread.__init__(self)
         self.clientClosed = False
         self.targetClosed = True
         self.client = socClient
-        self.client_buffer = b''
+        self.client_buffer = ''
         self.server = server
         self.log = 'Connection: ' + str(addr)
 
     def close(self):
-        if not self.clientClosed:
-            try:
+        try:
+            if not self.clientClosed:
                 self.client.shutdown(socket.SHUT_RDWR)
                 self.client.close()
-            except: pass
+        except:
+            pass
+        finally:
             self.clientClosed = True
-        if not self.targetClosed:
-            try:
+        try:
+            if not self.targetClosed:
                 self.target.shutdown(socket.SHUT_RDWR)
                 self.target.close()
-            except: pass
+        except:
+            pass
+        finally:
             self.targetClosed = True
 
     def run(self):
         try:
             self.client_buffer = self.client.recv(BUFLEN)
             hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
-            if not hostPort:
+            if hostPort == '':
                 hostPort = DEFAULT_HOST
-            split = self.findHeader(self.client_buffer, 'X-Split')
-            if split:
-                self.client.recv(BUFLEN)
-            passwd = self.findHeader(self.client_buffer, 'X-Pass')
-            self.method_CONNECT(hostPort)
+            if hostPort != '':
+                self.method_CONNECT(hostPort)
+            else:
+                self.client.send(b'HTTP/1.1 400 NoXRealHost!\\r\\n\\r\\n')
         except Exception as e:
             self.log += ' - error: ' + str(e)
             self.server.printLog(self.log)
@@ -144,11 +154,15 @@ class ConnectionHandler(threading.Thread):
     def findHeader(self, head, header):
         if isinstance(head, bytes):
             head = head.decode('utf-8')
-        idx = head.find(header + ': ')
-        if idx == -1:
+        aux = head.find(header + ': ')
+        if aux == -1:
             return ''
-        idx2 = head.find('\r\n', idx)
-        return head[idx+len(header)+2:idx2].strip()
+        aux = head.find(':', aux)
+        head = head[aux + 2:]
+        aux = head.find('\\r\\n')
+        if aux == -1:
+            return ''
+        return head[:aux]
 
     def connect_target(self, host):
         i = host.find(':')
@@ -166,7 +180,7 @@ class ConnectionHandler(threading.Thread):
         self.log += ' - CONNECT ' + path
         self.connect_target(path)
         self.client.sendall(RESPONSE.encode('utf-8'))
-        self.client_buffer = b''
+        self.client_buffer = ''
         self.server.printLog(self.log)
         self.doCONNECT()
 
@@ -196,11 +210,12 @@ class ConnectionHandler(threading.Thread):
                     except:
                         error = True
                         break
-            if count == TIMEOUT or error:
+            if count == TIMEOUT:
+                error = True
+            if error:
                 break
 
 def main():
-    print("Starting WSS on port {}".format(LISTENING_PORT))
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()
     try:
@@ -213,37 +228,33 @@ if __name__ == '__main__':
     main()
 EOF
 
-chmod +x /usr/local/bin/wss
-
-# ------------------------------
-# 安装 Tunnel4
-echo "安装 Tunnel4..."
-# 这里假设你已有 Tunnel4 安装命令或二进制，示例:
-# wget -O /usr/local/bin/tunnel4 https://example.com/tunnel4 && chmod +x /usr/local/bin/tunnel4
-# 创建默认配置和证书
-mkdir -p /etc/tunnel4
-cat >/etc/tunnel4/config.json <<EOC
-{
-    "port": $TUNNEL4_PORT,
-    "cert": "/etc/tunnel4/tls.crt",
-    "key": "/etc/tunnel4/tls.key"
+    sudo chmod +x /usr/local/bin/wss
+    echo "WSS 脚本创建完成，可直接运行: sudo /usr/local/bin/wss"
 }
-EOC
-# 假设生成自签名证书
-openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
-    -keyout /etc/tunnel4/tls.key \
-    -out /etc/tunnel4/tls.crt \
-    -subj "/CN=localhost"
 
-# ------------------------------
 # 安装 UDPGW
-echo "安装 UDPGW..."
-bash <(curl -Ls https://raw.githubusercontent.com/xpanel-cp/XPanel-SSH-User-Management/master/fix-call.sh --ipv4)
-# 端口可在交互中自定义
+install_udpgw() {
+    echo "安装 UDPGW..."
+    bash <(curl -Ls https://raw.githubusercontent.com/xpanel-cp/XPanel-SSH-User-Management/master/fix-call.sh) $UDPGW_PORT
+    echo "UDPGW 安装完成"
+}
 
-# ------------------------------
-echo "安装完成！服务端口:"
-echo "WSS: $WSS_PORT"
-echo "Tunnel4: $TUNNEL4_PORT"
-echo "UDPGW: $UDPGW_PORT"
-echo "可以使用 systemctl 启动/管理相应服务"
+# 安装 TUNNEL4
+install_tunnel4() {
+    echo "安装 TUNNEL4..."
+    bash <(curl -Ls https://raw.githubusercontent.com/xiaoguiday/http-payload/refs/heads/main/http-payload.sh) $TUNNEL4_PORT
+    echo "TUNNEL4 安装完成"
+}
+
+# -----------------------------
+# 执行顺序
+# -----------------------------
+install_packages
+create_wss_script
+install_udpgw
+install_tunnel4
+
+echo "所有服务安装完成！"
+echo "WSS 端口: $WSS_PORT"
+echo "TUNNEL4 端口: $TUNNEL4_PORT"
+echo "UDPGW 端口: $UDPGW_PORT"
