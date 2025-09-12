@@ -4,12 +4,12 @@ set -u
 set -o pipefail
 
 # 默认端口
-payload_PORT=80
+wss_PORT=80
 UDPGW_PORT=7300
 STUNNEL_PORT=443
 
 # 读取用户自定义端口
-read -p "请输入 WSS 监听端口（默认 80）: " input
+read -p "请输入 http payload 监听端口（默认 80）: " input
 [ -n "$input" ] && WSS_PORT=$input
 
 read -p "请输入 UDPGW 端口（默认 7300）: " input
