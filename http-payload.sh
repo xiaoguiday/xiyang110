@@ -3,59 +3,37 @@ set -e
 
 # 默认端口
 WSS_PORT=80
-UDPGW_PORT=7300
 STUNNEL_PORT=443
+UDPGW_PORT=7300
 
-echo "=============================="
-echo "  VPS 一键安装 WSS/UDPGW/Stunnel"
-echo "=============================="
+# 提示用户自定义端口
+read -p "请输入 WSS 监听端口（默认80）:" input
+[ -n "$input" ] && WSS_PORT=$input
 
-# 用户输入端口（可直接回车使用默认）
-read -p "请输入 WSS 监听端口（默认 80）: " input
-[ ! -z "$input" ] && WSS_PORT=$input
+read -p "请输入 stunnel4 监听端口（默认443）:" input
+[ -n "$input" ] && STUNNEL_PORT=$input
 
-read -p "请输入 UDPGW 端口（默认 7300）: " input
-[ ! -z "$input" ] && UDPGW_PORT=$input
+read -p "请输入 UDPGW 监听端口（默认7300）:" input
+[ -n "$input" ] && UDPGW_PORT=$input
 
-read -p "请输入 Stunnel 监听端口（默认 443）: " input
-[ ! -z "$input" ] && STUNNEL_PORT=$input
+# ====== 系统更新和依赖安装 ======
+echo "==== 更新系统并安装依赖 ===="
+sudo apt update -y
+sudo apt install -y python3 python3-pip wget curl git net-tools stunnel4
 
-echo "使用端口: WSS=$WSS_PORT, UDPGW=$UDPGW_PORT, Stunnel=$STUNNEL_PORT"
-
-# 等待 apt 可用
-wait_for_apt() {
-    while fuser /var/lib/dpkg/lock >/dev/null 2>&1 ; do
-        echo "正在等待其他 apt/dpkg 进程完成..."
-        sleep 3
-    done
-}
-
-# 更新系统并安装依赖
-install_packages() {
-    wait_for_apt
-    echo "更新系统..."
-    sudo apt update -y && sudo apt upgrade -y
-
-    echo "安装 Python3、pip、wget、curl、git、net-tools 等依赖..."
-    sudo apt install -y python3 python3-pip wget curl git net-tools
-    echo "依赖安装完成"
-}
-
-# 创建 WSS 脚本
-install_wss() {
-    echo "==== 安装 WSS 脚本 ===="
-    mkdir -p ~/wss
-    cat > ~/wss/wss.py <<EOF
+# ====== 创建 WSS 脚本 ======
+echo "==== 创建 WSS 脚本 ===="
+WSS_PATH="/usr/local/bin/wss"
+sudo tee $WSS_PATH << 'EOF' | cat
 #!/usr/bin/python3
 import socket, threading, select, sys, time
 
 LISTENING_ADDR = '0.0.0.0'
-LISTENING_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else $WSS_PORT
-
+LISTENING_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 DEFAULT_HOST = '127.0.0.1:22'
-RESPONSE = 'HTTP/1.1 101 Switching Protocols\\r\\nContent-Length: 104857600000\\r\\n\\r\\n'
+RESPONSE = 'HTTP/1.1 101 Switching Protocols\r\nContent-Length: 104857600000\r\n\r\n'
 
 class Server(threading.Thread):
     def __init__(self, host, port):
@@ -68,26 +46,25 @@ class Server(threading.Thread):
         self.logLock = threading.Lock()
 
     def run(self):
-        self.soc = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.soc = socket.socket(socket.AF_INET)
         self.soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.soc.settimeout(2)
         self.soc.bind((self.host, self.port))
         self.soc.listen(0)
         self.running = True
-        print(f"WSS 监听在 {self.host}:{self.port}")
         try:
             while self.running:
-                c, addr = self.soc.accept()
-                c.setblocking(1)
+                try:
+                    c, addr = self.soc.accept()
+                    c.setblocking(1)
+                except socket.timeout:
+                    continue
                 conn = ConnectionHandler(c, self, addr)
                 conn.start()
                 self.addConn(conn)
         finally:
             self.running = False
             self.soc.close()
-
-    def printLog(self, log):
-        with self.logLock:
-            print(log)
 
     def addConn(self, conn):
         with self.threadsLock:
@@ -100,9 +77,9 @@ class Server(threading.Thread):
                 self.threads.remove(conn)
 
     def close(self):
-        self.running = False
         with self.threadsLock:
-            for c in self.threads:
+            self.running = False
+            for c in list(self.threads):
                 c.close()
 
 class ConnectionHandler(threading.Thread):
@@ -112,7 +89,7 @@ class ConnectionHandler(threading.Thread):
         self.targetClosed = True
         self.client = socClient
         self.server = server
-        self.addr = addr
+        self.log = 'Connection: ' + str(addr)
 
     def close(self):
         try:
@@ -135,120 +112,101 @@ class ConnectionHandler(threading.Thread):
         try:
             data = self.client.recv(BUFLEN)
             hostPort = DEFAULT_HOST
-            self.connect_target(hostPort)
-            self.client.sendall(RESPONSE.encode('utf-8'))
-            self.doCONNECT()
+            self.method_CONNECT(hostPort)
         except Exception as e:
-            self.server.printLog(f"连接 {self.addr} 出错: {e}")
+            print("Error:", e)
         finally:
             self.close()
             self.server.removeConn(self)
 
-    def connect_target(self, host):
-        ip, port = host.split(':')
+    def method_CONNECT(self, path):
+        host, port = path.split(':')
         port = int(port)
         self.target = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.target.connect((ip, port))
+        self.target.connect((host, port))
         self.targetClosed = False
+        self.client.sendall(RESPONSE.encode())
+        self.doCONNECT()
 
     def doCONNECT(self):
         socs = [self.client, self.target]
-        count = 0
-        error = False
         while True:
-            count += 1
-            r, _, err = select.select(socs, [], socs, 3)
-            if err:
-                error = True
-            if r:
-                for s in r:
-                    try:
-                        d = s.recv(BUFLEN)
-                        if d:
-                            if s is self.target:
-                                self.client.send(d)
-                            else:
-                                while d:
-                                    sent = self.target.send(d)
-                                    d = d[sent:]
-                            count = 0
-                        else:
-                            break
-                    except:
-                        error = True
-                        break
-            if count == TIMEOUT:
-                error = True
-            if error:
+            try:
+                recv, _, _ = select.select(socs, [], [], 3)
+                for s in recv:
+                    data = s.recv(BUFLEN)
+                    if not data:
+                        return
+                    if s is self.client:
+                        self.target.sendall(data)
+                    else:
+                        self.client.sendall(data)
+            except:
                 break
 
-if __name__ == "__main__":
+def main():
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()
-    while True:
-        time.sleep(2)
+    print(f"WSS 正在运行，监听端口: {LISTENING_PORT}")
+    server.join()
+
+if __name__ == "__main__":
+    main()
 EOF
-    chmod +x ~/wss/wss.py
-    echo "WSS 脚本创建完成: ~/wss/wss.py"
-}
 
-# 安装 Stunnel4 并生成自签名证书
-install_stunnel() {
-    echo "==== 安装 Stunnel4 ===="
-    sudo apt install -y stunnel4 openssl
-    sudo mkdir -p /etc/stunnel/certs
+sudo chmod +x $WSS_PATH
+echo "==== WSS 脚本创建完成，内容如下 ===="
+cat $WSS_PATH
 
-    # 自动生成证书
-    CERT_PATH="/etc/stunnel/certs/stunnel.pem"
-    sudo openssl req -x509 -nodes -newkey rsa:2048 \
-        -keyout /etc/stunnel/certs/stunnel.key \
-        -out /etc/stunnel/certs/stunnel.crt \
-        -days 1095 \
-        -subj "/CN=localhost"
+# ====== stunnel4 安装与配置 ======
+echo "==== 配置 stunnel4 ===="
+sudo mkdir -p /etc/stunnel/certs
 
-    sudo sh -c "cat /etc/stunnel/certs/stunnel.key /etc/stunnel/certs/stunnel.crt > $CERT_PATH"
-    sudo chmod 644 /etc/stunnel/certs/*.pem
+echo "生成自签证书..."
+sudo openssl req -x509 -nodes -newkey rsa:2048 \
+-keyout /etc/stunnel/certs/wss.key \
+-out /etc/stunnel/certs/wss.crt \
+-days 1095 \
+-subj "/CN=example.com"
 
-    # 配置 stunnel
-    CONF_PATH="/etc/stunnel/ssh-tls.conf"
-    sudo bash -c "cat > $CONF_PATH" <<EOF
+sudo sh -c 'cat /etc/stunnel/certs/wss.key /etc/stunnel/certs/wss.crt > /etc/stunnel/certs/wss.pem'
+sudo chmod 644 /etc/stunnel/certs/*.pem
+
+echo "==== 证书生成完成，CRT 内容如下 ===="
+sudo cat /etc/stunnel/certs/wss.crt
+
+echo "创建 stunnel 配置..."
+sudo tee /etc/stunnel/ssh-tls.conf << EOF | cat
 pid=/var/run/stunnel.pid
 setuid=root
 setgid=root
+
 client = no
 debug = 5
 output = /var/log/stunnel4/stunnel.log
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 
-[ssh-tls]
+[ssh-tls-gateway]
 accept = 0.0.0.0:$STUNNEL_PORT
-cert = $CERT_PATH
-key = $CERT_PATH
+cert = /etc/stunnel/certs/wss.pem
+key = /etc/stunnel/certs/wss.pem
 connect = 127.0.0.1:22
 EOF
 
-    sudo systemctl enable stunnel4
-    sudo systemctl restart stunnel4
-    echo "Stunnel4 安装完成，监听端口: $STUNNEL_PORT"
-}
+echo "==== stunnel 配置完成 ===="
+cat /etc/stunnel/ssh-tls.conf
 
-# 安装 UDPGW
-install_udpgw() {
-    echo "==== 安装 UDPGW ===="
-    bash <(curl -Ls https://raw.githubusercontent.com/xpanel-cp/XPanel-SSH-User-Management/master/fix-call.sh --ipv4)
-    echo "UDPGW 安装完成，默认端口: $UDPGW_PORT"
-}
+sudo systemctl enable stunnel4
+sudo systemctl restart stunnel4
+echo "stunnel4 已启动"
 
-# 执行安装
-install_packages
-install_wss
-install_stunnel
-install_udpgw
+# ====== 安装 UDPGW ======
+echo "==== 安装 UDPGW ===="
+bash <(curl -Ls https://raw.githubusercontent.com/xpanel-cp/XPanel-SSH-User-Management/master/fix-call.sh --ipv4)
+echo "UDPGW 安装完成，默认端口: $UDPGW_PORT"
 
-echo "=============================="
-echo "安装完成！"
-echo "WSS 脚本路径: ~/wss/wss.py"
-echo "UDPGW 端口: $UDPGW_PORT"
-echo "Stunnel 监听端口: $STUNNEL_PORT"
-echo "=============================="
+echo "==== 安装完成 ===="
+echo "WSS: $WSS_PORT"
+echo "stunnel4: $STUNNEL_PORT"
+echo "UDPGW: $UDPGW_PORT"
