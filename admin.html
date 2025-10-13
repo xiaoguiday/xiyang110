@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <title>WSTunnel 管理系统</title>
+    <title>WSTunnel 系统管理</title>
     <style>
         body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol";background:#f4f7fb;margin:0;font-size:15px}
         .container{max-width:1400px;margin:0 auto;padding:0 18px}
@@ -41,7 +41,7 @@
 <script>
     const gid = id => document.getElementById(id); const contentArea = gid('content-area');
     let appState = { devices: {}, usage: {}, settings: null, connections: [], logs: [], currentUser: '' };
-    let activeIntervals = [];
+    let refreshInterval;
 
     async function apiRequest(url, options = {}) {
         try {
@@ -141,12 +141,11 @@
     async function resetTraffic() { const id = gid("device_id").value.trim(); if (!id) return alert("ID不能为空"); if (confirm(`确定重置流量?`)) { const r = await post("/device/reset_traffic", { device_id: id }); if (r && r.status === "ok") { alert(r.message); const usage = await get('/api/device_usage'); appState.usage = usage || appState.usage; renderDevicePage(); } } }
     function fillExisting() { const s = gid("existing_user"); if(!s.value) return; const [id, exp, lim, key, sessions] = s.value.split('|'); gid("device_id").value = id || ""; gid("expiry").value = exp || ""; gid("limit_gb").value = lim || ""; gid("sec_ws_key").value = key || ""; gid("max_sessions").value = sessions || "1"; }
     
-    async function updateAccount() { const d = { old_user: gid("old_user").value, old_pass: gid("old_pass").value, new_user: gid("new_user").value, new_pass: gid("new_pass").value }; if (Object.values(d).some(v => !v)) return alert("请完整填写"); const r = await post("/account/update", d); if (r) { alert(r.message); if (r.status === 'ok') { logout("密码已更新，请重新登录。"); } } }
+    async function updateAccount() { const d = { old_user: gid("old_user").value, old_pass: gid("old_pass").value, new_user: gid("new_user").value, new_pass: gid("new_pass").value }; if (Object.values(d).some(v => !v)) return alert("请完整填写"); const r = await post("/account/update", d); if (r) { alert(r.message); if (r.status === 'ok') { logout(); } } }
     
-    function logout(message = "正在安全退出...") {
-        document.body.innerHTML = `<h1>${message}</h1>`;
+    function logout() {
         post("/logout").finally(() => {
-            setTimeout(() => { window.location.href = "/"; }, 1500);
+            window.location.href = "/";
         });
     }
 
@@ -158,8 +157,9 @@
     function autoFill() { const d = parseInt(gid('auto_expiry').value), t = new Date(); t.setDate(t.getDate() + d); gid('expiry').value = `${t.getFullYear()}-${('0' + (t.getMonth() + 1)).slice(-2)}-${('0' + t.getDate()).slice(-2)}`; gid('limit_gb').value = gid('auto_limit').value; }
     
     const routes = { '#/status': renderStatusPage, '#/device': renderDevicePage, '#/account': renderAccountPage, '#/settings': renderSettingsPage, '#/logs': renderLogsPage };
+    
     function router() {
-        activeIntervals.forEach(clearInterval); activeIntervals = [];
+        // [修正] 从 router 中移除 clearInterval
         const path = window.location.hash || '#/status';
         const renderFunc = routes[path] || routes['#/status'];
         document.querySelectorAll('.navbar a').forEach(a => { a.classList.toggle('active', a.getAttribute('href') === path); });
@@ -169,25 +169,21 @@
     async function initializeApp() {
         contentArea.innerHTML = `<div class="card">正在初始化应用...</div>`;
         
-        // --- [UI修复] ---
-        // 从meta标签读取用户名，这是最可靠的方法
         const userMeta = document.querySelector('meta[name="user-context"]');
         if (userMeta) {
             appState.currentUser = userMeta.content;
         } else {
-            // 如果meta标签因为某些原因不存在，提供一个备用值
             appState.currentUser = "user";
         }
         gid('current-user').textContent = appState.currentUser;
-
-
+        
         const [devices, usage, settings] = await Promise.all([get('/api/devices'), get('/api/device_usage'), get('/api/settings')]);
         appState.devices = devices || {}; 
         appState.usage = usage || {}; 
         appState.settings = settings;
         
-        if (activeIntervals.length > 0) activeIntervals.forEach(clearInterval);
-        activeIntervals.push(setInterval(updateDynamicData, 3000));
+        if (refreshInterval) clearInterval(refreshInterval); // 清理旧的定时器以防万一
+        refreshInterval = setInterval(updateDynamicData, 3000);
         
         if (!window.location.hash) { window.location.hash = '#/status'; }
         
