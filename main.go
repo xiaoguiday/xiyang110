@@ -27,9 +27,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// =================================================================
-// 日志、配置、监控等模块... (与上一版完全相同，保持不变)
-// =================================================================
 
 const logBufferSize = 200
 type RingBuffer struct {
@@ -256,7 +253,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	wg.Wait(); cancel(); Print("[-] Closed connection for %s (Device: %s)", remoteIP, finalDeviceID)
 }
 
-// --- [CPU 性能修复] ---
+// --- [最终性能修复] ---
 func pipeTraffic(ctx context.Context, dst, src net.Conn, wg *sync.WaitGroup, connKey string, isUpload bool) {
 	defer wg.Done()
 	cfg := GetConfig()
@@ -264,19 +261,6 @@ func pipeTraffic(ctx context.Context, dst, src net.Conn, wg *sync.WaitGroup, con
 
 	for {
 		n, err := src.Read(buffer)
-
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		
-		if err != nil {
-			if tcpConn, ok := dst.(*net.TCPConn); ok {
-				_ = tcpConn.CloseWrite()
-			}
-			return
-		}
 
 		if n > 0 {
 			_, writeErr := dst.Write(buffer[:n])
@@ -292,6 +276,30 @@ func pipeTraffic(ctx context.Context, dst, src net.Conn, wg *sync.WaitGroup, con
 			} else {
 				UpdateConnTraffic(connKey, 0, int64(n), connInfo.DeviceID)
 			}
+		}
+
+		if err != nil {
+			if err != io.EOF {
+				// 可以在这里记录非预期的网络错误，但要避免刷屏
+				// Print("[-] Pipe error for %s: %v", connKey, err)
+			}
+			// 优雅关闭写端
+			if tcpConn, ok := dst.(*net.TCPConn); ok {
+				_ = tcpConn.CloseWrite()
+			}
+			return
+		}
+
+		// 核心防御点：如果Read返回(0, nil)，说明可能进入空转状态，主动休眠
+		if n == 0 {
+			time.Sleep(1 * time.Millisecond)
+		}
+
+		// 每次循环后检查context是否被取消
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 	}
 }
