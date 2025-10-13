@@ -188,7 +188,7 @@ func main() {
 	} else { Print("[!] Cert/Key file not found. WSS server will not start.") }
 	
 	adminMux := http.NewServeMux()
-	adminRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "text/html; charset=utf-8"); w.Write(adminPanelHTML) })
+	adminRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { user, ok := r.Context().Value("user").(string); if !ok { user = "unknown" }; html := string(adminPanelHTML); meta_tag := fmt.Sprintf(`<meta name="user-context" content="%s">`, user); finalHTML := strings.Replace(html, "<head>", "<head>\n    "+meta_tag, 1); w.Header().Set("Content-Type", "text/html; charset=utf-8"); w.Write([]byte(finalHTML)) })
 	adminMux.Handle("/", authMiddleware(adminRootHandler))
 	adminMux.HandleFunc("/login", loginHandler)
 	adminMux.HandleFunc("/logout", logoutHandler)
