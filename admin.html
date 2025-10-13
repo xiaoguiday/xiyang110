@@ -146,11 +146,9 @@
     
     async function updateAccount() { const d = { old_user: gid("old_user").value, old_pass: gid("old_pass").value, new_user: gid("new_user").value, new_pass: gid("new_pass").value }; if (Object.values(d).some(v => !v)) return alert("请完整填写"); const r = await post("/account/update", d); if (r) { alert(r.message); if (r.status === 'ok') { logout("密码已更新，请重新登录。"); } } }
     
-    function logout(message = "正在退出...") {
+    function logout() {
         post("/logout").finally(() => {
-            document.body.innerHTML = `<h1>${message}</h1>`;
-            // 使用一个较长的延迟确保cookie被清除，然后强制重新加载
-            setTimeout(() => window.location.reload(true), 1500);
+            window.location.href = "/";
         });
     }
 
