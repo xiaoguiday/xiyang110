@@ -24,7 +24,7 @@ import (
 
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
-	// --- [MERGE POINT 1] New import for password hashing ---
+	// -- [MERGE POINT 1] New import for password hashing --
 	"golang.org/x/crypto/bcrypt"
 )
 
