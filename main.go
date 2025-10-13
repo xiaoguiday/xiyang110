@@ -20,7 +20,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	// --- [架构重构 1] 引入 atomic 包 ---
 	"sync/atomic"
 	"time"
 
@@ -30,7 +29,7 @@ import (
 )
 
 // =================================================================
-// 日志、配置等基础模块...
+// 日志、配置等基础模块... (与上一版完全相同，保持不变)
 // =================================================================
 const logBufferSize = 200
 type RingBuffer struct { mu sync.RWMutex; buffer []string; head int }
@@ -57,55 +56,29 @@ func hashPassword(password string) (string, error) { bytes, err := bcrypt.Genera
 func checkPasswordHash(password, hash string) bool { err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); return err == nil }
 func (c *Config) FindDeviceByWSKey(wsKey string) (deviceID string, deviceInfo DeviceInfo, found bool) { c.lock.RLock(); defer c.lock.RUnlock(); for id, info := range c.DeviceIDs { if info.SecWSKey != "" && info.SecWSKey == wsKey { return id, info, true } }; return "", DeviceInfo{}, false }
 
-// =================================================================
-// ---------------------- METRICS (监控模块) ------------------------
-// =================================================================
+type ActiveConnInfo struct { Writer net.Conn; LastActive time.Time; DeviceID string; FirstConnection time.Time; Status string; IP string; BytesSent int64; BytesReceived int64; ConnKey string; LastSpeedUpdateTime time.Time; LastTotalBytesForSpeed int64; CurrentSpeedBps float64 }
+type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
+var ( globalBytesSent int64; globalBytesReceived int64; activeConns sync.Map; deviceUsage sync.Map; startTime = time.Now(); systemStatus SystemStatus; systemStatusMutex sync.RWMutex; adminPanelHTML []byte )
 
-// --- [架构重构 2] ActiveConnInfo 结构体中的流量计数器保持为 int64，以便进行原子操作 ---
-type ActiveConnInfo struct {
-	Writer                 net.Conn
-	LastActive             time.Time
-	DeviceID               string
-	FirstConnection        time.Time
-	Status                 string
-	IP                     string
-	BytesSent              int64 // This will be accessed atomically
-	BytesReceived          int64 // This will be accessed atomically
-	ConnKey                string
-	LastSpeedUpdateTime    time.Time
-	LastTotalBytesForSpeed int64
-	CurrentSpeedBps        float64
+// --- [崩溃修复 1] ---
+func InitMetrics() {
+	cfg := GetConfig()
+	devices := cfg.GetDeviceIDs()
+	for id, info := range devices {
+		// 必须存入指针类型
+		initialUsage := info.UsedBytes
+		deviceUsage.Store(id, &initialUsage)
+	}
 }
 
-// SystemStatus 保持不变
-type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
-
-// --- [架构重构 3] 全局流量计数器保持为 int64，以便进行原子操作 ---
-var (
-	globalBytesSent     int64
-	globalBytesReceived int64
-	activeConns         sync.Map
-	deviceUsage         sync.Map
-	startTime           = time.Now()
-	systemStatus        SystemStatus
-	systemStatusMutex   sync.RWMutex
-	adminPanelHTML      []byte
-)
-func InitMetrics() { cfg := GetConfig(); devices := cfg.GetDeviceIDs(); for id, info := range devices { deviceUsage.Store(id, info.UsedBytes) } }
 func AddActiveConn(key string, conn *ActiveConnInfo) { activeConns.Store(key, conn) }
 func RemoveActiveConn(key string) { activeConns.Delete(key) }
 func GetActiveConn(key string) (*ActiveConnInfo, bool) { if val, ok := activeConns.Load(key); ok { return val.(*ActiveConnInfo), true }; return nil, false }
 
-// runPeriodicTasks 和 collectSystemStatus 保持不变, 但 collectSystemStatus 现在会原子地读取全局流量
 func runPeriodicTasks() { saveTicker := time.NewTicker(5 * time.Second); go func() { for range saveTicker.C { saveDeviceUsage() } }(); statusTicker := time.NewTicker(2 * time.Second); go func() { for range statusTicker.C { collectSystemStatus() } }() }
 func saveDeviceUsage() { cfg := GetConfig(); cfg.lock.Lock(); defer cfg.lock.Unlock(); isDirty := false; deviceUsage.Range(func(key, value interface{}) bool { id := key.(string); currentUsage := value.(*int64); if info, ok := cfg.DeviceIDs[id]; ok { if info.UsedBytes != atomic.LoadInt64(currentUsage) { info.UsedBytes = atomic.LoadInt64(currentUsage); cfg.DeviceIDs[id] = info; isDirty = true } }; return true }); if isDirty { if err := cfg.save(); err != nil { Print("[!] Failed to save device usage: %v", err) } } }
 func collectSystemStatus() { systemStatusMutex.Lock(); defer systemStatusMutex.Unlock(); systemStatus.Uptime = time.Since(startTime).Round(time.Second).String(); cp, err := cpu.Percent(0, false); if err == nil && len(cp) > 0 { systemStatus.CPUPercent, _ = strconv.ParseFloat(fmt.Sprintf("%.1f", cp[0]), 64) }; if cores, err := cpu.Counts(true); err == nil { systemStatus.CPUCores = cores }; if vm, err := mem.VirtualMemory(); err == nil { systemStatus.MemTotal = vm.Total; systemStatus.MemUsed = vm.Used; systemStatus.MemPercent, _ = strconv.ParseFloat(fmt.Sprintf("%.1f", vm.UsedPercent), 64) }; systemStatus.BytesSent = atomic.LoadInt64(&globalBytesSent); systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived) }
 
-// =================================================================
-// ------------------ WS/WSS HANDLER (核心处理逻辑) ----------------
-// =================================================================
-
-// handleClient 保持不变, 但它现在会调用重构后的 pipeTraffic
 func handleClient(conn net.Conn, isTLS bool) {
 	defer conn.Close()
 	cfg := GetConfig(); settings := cfg.GetSettings(); remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String()); connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
@@ -127,9 +100,19 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.EnableDeviceIDAuth {
 			if !found { Print("[!] Auth Enabled: Invalid or missing Sec-WebSocket-Key from %s. Rejecting.", remoteIP); _, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n")); return }
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry); if err != nil || time.Now().After(expiry.Add(24*time.Hour)) { Print("[!] Auth Enabled: Device ID %s has expired. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
+			
+            // --- [崩溃修复 2] ---
 			var deviceUsagePtr *int64
-			if val, ok := deviceUsage.Load(finalDeviceID); ok { deviceUsagePtr = val.(*int64) } else { newUsage := int64(0); deviceUsage.Store(finalDeviceID, &newUsage); deviceUsagePtr = &newUsage }
+			if val, ok := deviceUsage.Load(finalDeviceID); ok {
+				deviceUsagePtr = val.(*int64)
+			} else {
+				// 如果设备是新设备，map里没有它的流量记录，我们需要创建一个新的计数器（指针）
+				newUsage := deviceInfo.UsedBytes // 使用配置中的值作为初始值
+				deviceUsage.Store(finalDeviceID, &newUsage)
+				deviceUsagePtr = &newUsage
+			}
 			if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 { Print("[!] Auth Enabled: Traffic limit reached for %s. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
+
 		} else { if !found { finalDeviceID = remoteIP } }
 		if connInfo, ok := GetActiveConn(connKey); ok { connInfo.DeviceID = finalDeviceID }
 		ua := req.UserAgent()
@@ -158,107 +141,45 @@ func handleClient(conn net.Conn, isTLS bool) {
 	wg.Wait(); cancel(); Print("[-] Closed connection for %s (Device: %s)", remoteIP, finalDeviceID)
 }
 
-// --- [架构重构 4] 引入流量统计包装器 ---
-type copyTracker struct {
-	io.Writer
-	ConnInfo      *ActiveConnInfo
-	DeviceID      string
-	IsUpload      bool
-	DeviceUsagePtr *int64
-}
-
+type copyTracker struct { io.Writer; ConnInfo *ActiveConnInfo; DeviceID string; IsUpload bool; DeviceUsagePtr *int64 }
 func (c *copyTracker) Write(p []byte) (n int, err error) {
 	n, err = c.Writer.Write(p)
 	if n > 0 {
-		if c.IsUpload {
-			atomic.AddInt64(&globalBytesSent, int64(n))
-			atomic.AddInt64(&c.ConnInfo.BytesSent, int64(n))
-		} else {
-			atomic.AddInt64(&globalBytesReceived, int64(n))
-			atomic.AddInt64(&c.ConnInfo.BytesReceived, int64(n))
-		}
-		if c.DeviceID != "" && c.DeviceID != "unknown_device" && c.DeviceUsagePtr != nil {
-			atomic.AddInt64(c.DeviceUsagePtr, int64(n))
-		}
-		// time.Now() is expensive, update it less frequently if needed, but for now this is fine.
+		if c.IsUpload { atomic.AddInt64(&globalBytesSent, int64(n)); atomic.AddInt64(&c.ConnInfo.BytesSent, int64(n)) } else { atomic.AddInt64(&globalBytesReceived, int64(n)); atomic.AddInt64(&c.ConnInfo.BytesReceived, int64(n)) }
+		if c.DeviceID != "" && c.DeviceID != "unknown_device" && c.DeviceUsagePtr != nil { atomic.AddInt64(c.DeviceUsagePtr, int64(n)) }
 		c.ConnInfo.LastActive = time.Now()
 	}
 	return
 }
-
-// --- [架构重构 5] 重构 pipeTraffic 以使用 io.Copy 和包装器 ---
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst, src net.Conn, connKey, deviceID string, isUpload bool) {
 	defer wg.Done()
-	
 	connInfo, ok := GetActiveConn(connKey)
-	if !ok {
-		return
-	}
-
+	if !ok { return }
 	var deviceUsagePtr *int64
 	if deviceID != "" && deviceID != "unknown_device" {
 		if val, ok := deviceUsage.Load(deviceID); ok {
 			deviceUsagePtr = val.(*int64)
 		}
 	}
-	
-	tracker := &copyTracker{
-		Writer:         dst,
-		ConnInfo:       connInfo,
-		DeviceID:       deviceID,
-		IsUpload:       isUpload,
-		DeviceUsagePtr: deviceUsagePtr,
-	}
-
-	// Use io.Copy for efficient, optimized data transfer
-	io.Copy(tracker, src)
-	
-	// After copy finishes (due to error or EOF), close the write-end of the destination connection.
-	if tcpConn, ok := dst.(*net.TCPConn); ok {
-		_ = tcpConn.CloseWrite()
-	}
+	tracker := &copyTracker{ Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr, }
+	buf := make([]byte, 32*1024)
+	io.CopyBuffer(tracker, src, buf)
+	if tcpConn, ok := dst.(*net.TCPConn); ok { _ = tcpConn.CloseWrite() }
 }
 
 func extractHeaderValue(text, name string) string { re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name))); m := re.FindStringSubmatch(text); if len(m) > 1 { return strings.TrimSpace(m[1]) }; return "" }
 func isIPInList(ip string, list []string) bool { for _, item := range list { if item == ip { return true } }; return false }
 
-// =================================================================
-// ------------------ SSH USER MGMT (SSH用户管理) ------------------
-// =================================================================
 func runCommand(command string, args ...string) (bool, string) { cmd := exec.Command(command, args...); var out, stderr bytes.Buffer; cmd.Stdout = &out; cmd.Stderr = &stderr; err := cmd.Run(); if err != nil { return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String()) }; return true, out.String() }
 func manageSshUser(username, password, action string) (bool, string) { if os.Geteuid() != 0 { return false, "此操作需要 root 权限。" }; if !regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,30}$`).MatchString(username) { return false, "无效的用户名。请使用小写字母、数字、下划线或连字符。" }; sshdConfigPath := "/etc/ssh/sshd_config"; startMarker := fmt.Sprintf("# WSSUSER_BLOCK_START_%s", username); endMarker := fmt.Sprintf("# WSSUSER_BLOCK_END_%s", username); cleanSshdConfig := func() error { content, err := ioutil.ReadFile(sshdConfigPath); if err != nil { if os.IsNotExist(err) { return nil }; return err }; lines := strings.Split(string(content), "\n"); var newLines []string; inBlock := false; for _, line := range lines { if strings.Contains(line, startMarker) { inBlock = true; continue }; if strings.Contains(line, endMarker) { inBlock = false; continue }; if !inBlock { newLines = append(newLines, line) } }; return ioutil.WriteFile(sshdConfigPath, []byte(strings.Join(newLines, "\n")), 0644) }; restartSshd := func() (bool, string) { success, msg := runCommand("systemctl", "restart", "sshd"); if !success { success, msg = runCommand("systemctl", "restart", "ssh") }; return success, msg }; if action == "delete" { if err := cleanSshdConfig(); err != nil { return false, fmt.Sprintf("清理 sshd_config 失败: %v", err) }; cmd := exec.Command("id", username); if cmd.Run() == nil { delSuccess, msg := runCommand("userdel", "-r", username); if !delSuccess { return false, fmt.Sprintf("删除用户失败: %s", msg) } }; sshdRestartSuccess, msg := restartSshd(); if !sshdRestartSuccess { return false, fmt.Sprintf("SSHD/SSH 重启失败: %s", msg) }; return true, fmt.Sprintf("用户 %s 及相关配置已成功删除。", username) }; if action == "create" { if password == "" { return false, "创建用户时必须提供密码。" }; if err := cleanSshdConfig(); err != nil { return false, fmt.Sprintf("清理旧 sshd_config 失败: %v", err) }; cmd := exec.Command("id", username); if cmd.Run() != nil { addSuccess, msg := runCommand("useradd", "-m", "-s", "/bin/bash", username); if !addSuccess { return false, fmt.Sprintf("创建用户失败: %s", msg) } }; chpasswdCmd := exec.Command("chpasswd"); chpasswdCmd.Stdin = strings.NewReader(fmt.Sprintf("%s:%s", username, password)); if err := chpasswdCmd.Run(); err != nil { return false, fmt.Sprintf("设置密码失败: %v", err) }; f, err := os.OpenFile(sshdConfigPath, os.O_APPEND|os.O_WRONLY, 0644); if err != nil { return false, fmt.Sprintf("打开 sshd_config 失败: %v", err) }; newBlock := fmt.Sprintf("\n%s\nMatch User %s Address 127.0.0.1,::1\n    PasswordAuthentication yes\n    PermitTTY yes\n    AllowTcpForwarding yes\nMatch User %s Address *,!127.0.0.1,!::1\n    PasswordAuthentication no\n    PermitTTY no\n    AllowTcpForwarding no\n%s\n", startMarker, username, username, endMarker); _, _ = f.WriteString(newBlock); f.Close(); sshdRestartSuccess, msg := restartSshd(); if !sshdRestartSuccess { return false, fmt.Sprintf("SSHD/SSH 重启失败: %s", msg) }; return true, fmt.Sprintf("SSH 用户 '%s' 已成功创建/更新。", username) }; return false, "未知操作。" }
-
-// =================================================================
-// ------------------ ADMIN PANEL (Web管理面板) --------------------
-// =================================================================
 
 func basicAuth(handler http.HandlerFunc) http.HandlerFunc { return func(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); user, pass, ok := r.BasicAuth(); if !ok { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; cfg.lock.RLock(); storedPass, accountOk := cfg.Accounts[user]; cfg.lock.RUnlock(); if !accountOk { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; valid := false; if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") { valid = checkPasswordHash(pass, storedPass) } else { valid = (pass == storedPass) }; if !valid { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; ctx := context.WithValue(r.Context(), "user", user); handler(w, r.WithContext(ctx)) } }
 func sendJSON(w http.ResponseWriter, code int, payload interface{}) { response, _ := json.Marshal(payload); w.Header().Set("Content-Type", "application/json"); w.WriteHeader(code); _, _ = w.Write(response) }
 func formatBytes(b int64) string { const unit = 1024; if b < unit { return fmt.Sprintf("%d B", b) }; div, exp := int64(unit), 0; for n := b / unit; n >= unit; n /= unit { div *= unit; exp++ }; return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp]) }
-
-// --- [架构重构 6] APIConnectionResponse 现在需要原子地读取流量 ---
-type APIConnectionResponse struct {
-	DeviceID      string `json:"device_id"`
-	Status        string `json:"status"`
-	SentStr       string `json:"sent_str"`
-	RcvdStr       string `json:"rcvd_str"`
-	SpeedStr      string `json:"speed_str"`
-	RemainingStr  string `json:"remaining_str"`
-	Expiry        string `json:"expiry"`
-	IP            string `json:"ip"`
-	FirstConn     string `json:"first_conn"`
-	LastActive    string `json:"last_active"`
-	ConnKey       string `json:"conn_key"`
-}
-func handleAPI(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); var reqData map[string]interface{}; if r.Body != nil { body, err := ioutil.ReadAll(r.Body); if err == nil && len(body) > 0 { _ = json.Unmarshal(body, &reqData) } }; switch r.URL.Path { case "/api/connections": var conns []*ActiveConnInfo; activeConns.Range(func(key, value interface{}) bool { conns = append(conns, value.(*ActiveConnInfo)); return true }); sort.Slice(conns, func(i, j int) bool { statusOrder := map[string]int{"活跃": 0, "握手": 1}; if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }; return conns[i].FirstConnection.Before(conns[j].FirstConnection) }); resp := []APIConnectionResponse{}; now := time.Now(); for _, c := range conns {
-	bytesSent := atomic.LoadInt64(&c.BytesSent); bytesReceived := atomic.LoadInt64(&c.BytesReceived)
-	if c.Status == "活跃" { timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds(); if timeDelta >= 2 { currentTotalBytes := bytesSent + bytesReceived; bytesDelta := currentTotalBytes - c.LastTotalBytesForSpeed; if timeDelta > 0 { c.CurrentSpeedBps = float64(bytesDelta) / timeDelta }; c.LastSpeedUpdateTime = now; c.LastTotalBytesForSpeed = currentTotalBytes } }; remainingStr := "无限制"; deviceInfo, ok := cfg.GetDeviceIDs()[c.DeviceID]; if ok && deviceInfo.LimitGB > 0 { var currentUsage int64; if val, ok := deviceUsage.Load(c.DeviceID); ok { currentUsage = atomic.LoadInt64(val.(*int64)) }; remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - currentUsage; if remainingBytes < 0 { remainingBytes = 0 }; remainingStr = formatBytes(remainingBytes) }; resp = append(resp, APIConnectionResponse{ DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: c.LastActive.Format("15:04:05"), ConnKey: c.ConnKey, }) }; sendJSON(w, http.StatusOK, resp); case "/api/kick": connKey, _ := reqData["conn_key"].(string); if conn, ok := GetActiveConn(connKey); ok { _ = conn.Writer.Close(); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "连接已踢掉"}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "连接未找到"}) }; case "/api/clear": connKey, _ := reqData["conn_key"].(string); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok"}); case "/api/device_usage": usageMap := make(map[string]int64); deviceUsage.Range(func(key, value interface{}) bool { usageMap[key.(string)] = atomic.LoadInt64(value.(*int64)); return true }); sendJSON(w, http.StatusOK, usageMap); case "/api/logs": sendJSON(w, http.StatusOK, logBuffer.GetLogs()); case "/api/server_status": systemStatusMutex.RLock(); defer systemStatusMutex.RUnlock(); sendJSON(w, http.StatusOK, systemStatus); case "/api/devices": sendJSON(w, http.StatusOK, cfg.GetDeviceIDs()); case "/api/settings": sendJSON(w, http.StatusOK, cfg.GetSettings()); case "/api/settings/toggle_device_auth": enable, _ := reqData["enable"].(bool); cfg.lock.Lock(); cfg.Settings.EnableDeviceIDAuth = enable; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { statusText := "开启"; if !enable { statusText = "关闭" }; sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)}) }; case "/api/ssh/create", "/api/ssh/delete": action := filepath.Base(r.URL.Path); username, _ := reqData["username"].(string); password, _ := reqData["password"].(string); success, message := manageSshUser(username, password, action); status := "ok"; if !success { status = "error" }; sendJSON(w, http.StatusOK, map[string]string{"status": status, "message": message}); default: http.NotFound(w, r) } }
+type APIConnectionResponse struct { DeviceID string `json:"device_id"`; Status string `json:"status"`; SentStr string `json:"sent_str"`; RcvdStr string `json:"rcvd_str"`; SpeedStr string `json:"speed_str"`; RemainingStr string `json:"remaining_str"`; Expiry string `json:"expiry"`; IP string `json:"ip"`; FirstConn string `json:"first_conn"`; LastActive string `json:"last_active"`; ConnKey string `json:"conn_key"` }
+func handleAPI(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); var reqData map[string]interface{}; if r.Body != nil { body, err := ioutil.ReadAll(r.Body); if err == nil && len(body) > 0 { _ = json.Unmarshal(body, &reqData) } }; switch r.URL.Path { case "/api/connections": var conns []*ActiveConnInfo; activeConns.Range(func(key, value interface{}) bool { conns = append(conns, value.(*ActiveConnInfo)); return true }); sort.Slice(conns, func(i, j int) bool { statusOrder := map[string]int{"活跃": 0, "握手": 1}; if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }; return conns[i].FirstConnection.Before(conns[j].FirstConnection) }); resp := []APIConnectionResponse{}; now := time.Now(); for _, c := range conns { bytesSent := atomic.LoadInt64(&c.BytesSent); bytesReceived := atomic.LoadInt64(&c.BytesReceived); if c.Status == "活跃" { timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds(); if timeDelta >= 2 { currentTotalBytes := bytesSent + bytesReceived; bytesDelta := currentTotalBytes - c.LastTotalBytesForSpeed; if timeDelta > 0 { c.CurrentSpeedBps = float64(bytesDelta) / timeDelta }; c.LastSpeedUpdateTime = now; c.LastTotalBytesForSpeed = currentTotalBytes } }; remainingStr := "无限制"; deviceInfo, ok := cfg.GetDeviceIDs()[c.DeviceID]; if ok && deviceInfo.LimitGB > 0 { var currentUsage int64; if val, ok := deviceUsage.Load(c.DeviceID); ok { currentUsage = atomic.LoadInt64(val.(*int64)) }; remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - currentUsage; if remainingBytes < 0 { remainingBytes = 0 }; remainingStr = formatBytes(remainingBytes) }; resp = append(resp, APIConnectionResponse{ DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: c.LastActive.Format("15:04:05"), ConnKey: c.ConnKey, }) }; sendJSON(w, http.StatusOK, resp); case "/api/kick": connKey, _ := reqData["conn_key"].(string); if conn, ok := GetActiveConn(connKey); ok { _ = conn.Writer.Close(); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "连接已踢掉"}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "连接未找到"}) }; case "/api/clear": connKey, _ := reqData["conn_key"].(string); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok"}); case "/api/device_usage": usageMap := make(map[string]int64); deviceUsage.Range(func(key, value interface{}) bool { usageMap[key.(string)] = atomic.LoadInt64(value.(*int64)); return true }); sendJSON(w, http.StatusOK, usageMap); case "/api/logs": sendJSON(w, http.StatusOK, logBuffer.GetLogs()); case "/api/server_status": systemStatusMutex.RLock(); defer systemStatusMutex.RUnlock(); sendJSON(w, http.StatusOK, systemStatus); case "/api/devices": sendJSON(w, http.StatusOK, cfg.GetDeviceIDs()); case "/api/settings": sendJSON(w, http.StatusOK, cfg.GetSettings()); case "/api/settings/toggle_device_auth": enable, _ := reqData["enable"].(bool); cfg.lock.Lock(); cfg.Settings.EnableDeviceIDAuth = enable; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { statusText := "开启"; if !enable { statusText = "关闭" }; sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)}) }; case "/api/ssh/create", "/api/ssh/delete": action := filepath.Base(r.URL.Path); username, _ := reqData["username"].(string); password, _ := reqData["password"].(string); success, message := manageSshUser(username, password, action); status := "ok"; if !success { status = "error" }; sendJSON(w, http.StatusOK, map[string]string{"status": status, "message": message}); default: http.NotFound(w, r) } }
 func handleAdminPost(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); var reqData map[string]interface{}; if json.NewDecoder(r.Body).Decode(&reqData) != nil { sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的JSON格式"}); return }; switch r.URL.Path { case "/device/add": did, _ := reqData["device_id"].(string); exp, _ := reqData["expiry"].(string); limitStr, _ := reqData["limit_gb"].(string); secWSKey, _ := reqData["sec_ws_key"].(string); maxSessionsRaw, hasMaxSessions := reqData["max_sessions"]; if did == "" || exp == "" || secWSKey == "" { sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "ID, 有效期, 和 Sec-WebSocket-Key 不能为空"}); return }; limit, _ := strconv.Atoi(limitStr); ms := 1; if hasMaxSessions { switch v := maxSessionsRaw.(type) { case float64: ms = int(v); case string: ms, _ = strconv.Atoi(v) }; if ms < 0 || ms > 5 { ms = 1 } }; cfg.lock.Lock(); currentUsage := int64(0); if oldInfo, ok := cfg.DeviceIDs[did]; ok { currentUsage = oldInfo.UsedBytes }; cfg.DeviceIDs[did] = DeviceInfo{ Expiry: exp, LimitGB: limit, UsedBytes: currentUsage, SecWSKey: secWSKey, MaxSessions: ms, }; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"}) }; case "/device/delete": did, _ := reqData["device_id"].(string); cfg.lock.Lock(); delete(cfg.DeviceIDs, did); cfg.lock.Unlock(); deviceUsage.Delete(did); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"}) }; case "/device/reset_traffic": did, _ := reqData["device_id"].(string); if val, ok := deviceUsage.Load(did); ok { atomic.StoreInt64(val.(*int64), 0) }; cfg.lock.Lock(); if info, ok := cfg.DeviceIDs[did]; ok { info.UsedBytes = 0; cfg.DeviceIDs[did] = info }; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }; case "/account/update": ou, _ := reqData["old_user"].(string); op, _ := reqData["old_pass"].(string); nu, _ := reqData["new_user"].(string); np, _ := reqData["new_pass"].(string); cfg.lock.RLock(); storedPass, ok := cfg.Accounts[ou]; cfg.lock.RUnlock(); if !ok { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"}); return }; valid := false; if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") { valid = checkPasswordHash(op, storedPass) } else { valid = (op == storedPass) }; if !valid { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原密码错误"}); return }; h, err := hashPassword(np); if err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "密码加密失败"}); return }; cfg.lock.Lock(); if ou != nu { delete(cfg.Accounts, ou) }; cfg.Accounts[nu] = h; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }; case "/settings/save": oldSettings := cfg.GetSettings(); oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}; var newSettings Settings; settingsBytes, _ := json.Marshal(reqData); _ = json.Unmarshal(settingsBytes, &newSettings); if wl, ok := reqData["ip_whitelist"].(string); ok { newSettings.IPWhitelist = strings.Split(wl, ",") }; if bl, ok := reqData["ip_blacklist"].(string); ok { newSettings.IPBlacklist = strings.Split(bl, ",") }; cfg.lock.Lock(); cfg.Settings = newSettings; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)}); return }; newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}; portsChanged := false; for i := range oldPorts { if oldPorts[i] != newPorts[i] { portsChanged = true; break } }; if portsChanged { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."}); go func() { time.Sleep(1 * time.Second); Print("[*] Port settings changed. Restarting server..."); executable, _ := os.Executable(); cmd := exec.Command(executable, os.Args[1:]...); cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin; if err := cmd.Start(); err != nil { Print("[!] FATAL: Failed to restart process: %v", err); os.Exit(1) }; os.Exit(0) }() } else { Print("[*] Settings updated and hot-reloaded successfully."); sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"}) } } }
 func handleAdminPage(w http.ResponseWriter, r *http.Request) { if r.URL.Path != "/" { http.NotFound(w, r); return }; user := r.Context().Value("user").(string); systemStatusMutex.RLock(); activeCount := 0; activeConns.Range(func(key, value interface{}) bool { if value.(*ActiveConnInfo).Status == "活跃" { activeCount++ }; return true }); memStr := "N/A"; if systemStatus.MemTotal > 0 { memStr = fmt.Sprintf("%.1f/%.1f GB (%.1f%%)", float64(systemStatus.MemUsed)/1073741824, float64(systemStatus.MemTotal)/1073741824, systemStatus.MemPercent) }; html := string(adminPanelHTML); html = strings.Replace(html, "__USER__", user, -1); html = strings.Replace(html, "__ACTIVE_COUNT__", strconv.Itoa(activeCount), -1); html = strings.Replace(html, "__GLOBAL_SENT__", formatBytes(atomic.LoadInt64(&globalBytesSent)), -1); html = strings.Replace(html, "__GLOBAL_RECEIVED__", formatBytes(atomic.LoadInt64(&globalBytesReceived)), -1); html = strings.Replace(html, "__UPTIME__", systemStatus.Uptime, -1); html = strings.Replace(html, "__CPU__", fmt.Sprintf("%.1f%%", systemStatus.CPUPercent), -1); html = strings.Replace(html, "__CPU_CORES__", strconv.Itoa(systemStatus.CPUCores), -1); html = strings.Replace(html, "__MEM__", memStr, -1); systemStatusMutex.RUnlock(); w.Header().Set("Content-Type", "text/html; charset=utf-8"); _, _ = w.Write([]byte(html)) }
-
-// =================================================================
-// ---------------------- MAIN (主函数) ---------------------------
-// =================================================================
 
 func main() {
 	log.SetOutput(ioutil.Discard)
