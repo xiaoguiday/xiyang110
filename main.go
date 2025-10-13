@@ -1,7 +1,7 @@
 package main
 
 import (
-	// "bufio" // <-- 注意：如果你在其他地方没有用到，可以删除，但旧的 handleClient 用到了，所以我们保留
+	// "bufio" // <-- 注意：如果你在其他地方没有用到，可以删除，但旧的 handleClient 用到了
 	"bufio"
 	"bytes"
 	"context"
