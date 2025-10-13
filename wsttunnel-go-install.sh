@@ -3,8 +3,9 @@
 # =================================================================
 # WSTunnel-Go 全自动一键安装/更新脚本 (健壮版)
 # 作者: xiaoguiday
-# 创建时间:2025-10-13-10-48
-# 版本: 1.1
+# 更新时间: 2025-10-14
+# 版本: 1.2
+# 更新内容: 增加对 login.html 的下载和部署
 # =================================================================
 
 set -e # 任何命令失败，脚本立即退出
@@ -75,8 +76,11 @@ info "第 4 步: 正在准备项目目录并拉取最新代码..."
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR" || error_exit "进入项目目录 '$PROJECT_DIR' 失败！"
 
+# 同时下载三个必需的文件
 wget -q -O main.go "https://raw.githubusercontent.com/${GITHUB_REPO}/main/main.go" || error_exit "下载 main.go 失败！"
 wget -q -O admin.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/admin.html" || error_exit "下载 admin.html 失败！"
+# --- [新増] 下载 login.html ---
+wget -q -O login.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/login.html" || error_exit "下载 login.html 失败！"
 info "最新代码拉取成功。"
 echo " "
 
@@ -92,8 +96,12 @@ echo " "
 
 # 6. 部署文件
 info "第 6 步: 正在部署文件到 ${DEPLOY_DIR}/ ..."
+# 移动可执行文件
 mv ./${BINARY_NAME} ${DEPLOY_DIR}/ || error_exit "移动 ${BINARY_NAME} 失败！"
+# 移动网页文件
 mv ./admin.html ${DEPLOY_DIR}/ || error_exit "移动 admin.html 失败！"
+# --- [新増] 移动 login.html ---
+mv ./login.html ${DEPLOY_DIR}/ || error_exit "移动 login.html 失败！"
 info "文件部署成功。"
 echo " "
 
