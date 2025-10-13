@@ -136,7 +136,7 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 			}
 		}
 
-		// 3. 所有认证方式都失败，要求登录
+		// 3. 所有认证方式都失败，要求登陆.
 		w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`)
 		http.Error(w, "Unauthorized.", http.StatusUnauthorized)
 	}
