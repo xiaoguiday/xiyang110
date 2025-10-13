@@ -99,6 +99,7 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 			sessionsLock.RUnlock()
 			if ok && time.Now().Before(session.Expiry) {
 				ctx := context.WithValue(r.Context(), "user", session.Username)
+				w.Header().Set("X-WST-User", session.Username)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
