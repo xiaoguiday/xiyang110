@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	"github.comcom/shirou/gopsutil/v3/cpu"
+	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt" // <--- [集成点 1] 新增的 import
 )
