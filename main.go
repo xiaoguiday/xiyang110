@@ -28,7 +28,7 @@ import (
 )
 
 // =================================================================
-// ---------------------- LOGGER (日志模块) -------------------------
+// 日志、配置、监控等模块... (与上一版完全相同，保持不变)
 // =================================================================
 
 const logBufferSize = 200
@@ -60,10 +60,6 @@ func (rb *RingBuffer) GetLogs() []string {
 var logBuffer *RingBuffer
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
-
-// =================================================================
-// ---------------------- CONFIG (配置模块) -------------------------
-// =================================================================
 
 var ConfigFile = "ws_config.json"
 type Settings struct {
@@ -147,10 +143,6 @@ func (c *Config) FindDeviceByWSKey(wsKey string) (deviceID string, deviceInfo De
 	return "", DeviceInfo{}, false
 }
 
-// =================================================================
-// ---------------------- METRICS (监控模块) ------------------------
-// =================================================================
-
 type ActiveConnInfo struct { Writer net.Conn `json:"-"`; LastActive time.Time `json:"last_active_time"`; DeviceID string `json:"device_id"`; FirstConnection time.Time `json:"first_connection_time"`; Status string `json:"status"`; IP string `json:"ip"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"`; ConnKey string `json:"conn_key"`; LastSpeedUpdateTime time.Time `json:"-"`; LastTotalBytesForSpeed int64 `json:"-"`; CurrentSpeedBps float64 `json:"-"` }
 type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
 var ( globalBytesSent int64; globalBytesReceived int64; activeConns sync.Map; deviceUsage sync.Map; startTime = time.Now(); systemStatus SystemStatus; systemStatusMutex sync.RWMutex; adminPanelHTML []byte )
@@ -209,34 +201,28 @@ func handleClient(conn net.Conn, isTLS bool) {
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
 		body, _ := ioutil.ReadAll(req.Body)
 		initialData = body
-
-		if settings.EnableDeviceIDAuth {
-			clientWSKey := req.Header.Get("Sec-WebSocket-Key")
-			if clientWSKey == "" {
-				Print("[!] Auth Enabled: No Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
-				_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n"))
-				return
-			}
-			
-			var found bool
+        
+		// --- [修复点1: 关闭验证后的用户显示] ---
+		clientWSKey := req.Header.Get("Sec-WebSocket-Key")
+		var found bool
+		if clientWSKey != "" {
 			finalDeviceID, deviceInfo, found = cfg.FindDeviceByWSKey(clientWSKey)
+		}
+		
+		// 如果ID验证是开启的，那么必须找到用户
+		if settings.EnableDeviceIDAuth {
 			if !found {
-				Print("[!] Auth Enabled: Invalid Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
+				Print("[!] Auth Enabled: Invalid or missing Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
 				_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n"))
 				return
 			}
-
-			if connInfo, ok := GetActiveConn(connKey); ok {
-				connInfo.DeviceID = finalDeviceID
-			}
-
+			// 认证成功，继续检查有效期和流量
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
 				Print("[!] Auth Enabled: Device ID %s has expired. Rejecting.", finalDeviceID)
 				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
 			}
-
 			usage, _ := deviceUsage.LoadOrStore(finalDeviceID, int64(0))
 			if deviceInfo.LimitGB > 0 && usage.(int64) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
 				Print("[!] Auth Enabled: Traffic limit reached for %s. Rejecting.", finalDeviceID)
@@ -244,11 +230,18 @@ func handleClient(conn net.Conn, isTLS bool) {
 				return
 			}
 		} else {
-			finalDeviceID = "auth_disabled"
+			// ID验证关闭，如果没找到用户，就用IP作为ID
+			if !found {
+				finalDeviceID = remoteIP
+			}
 		}
-		
-		ua := req.UserAgent()
+        
+		if connInfo, ok := GetActiveConn(connKey); ok {
+			connInfo.DeviceID = finalDeviceID
+		}
+		// --- [修复点1 结束] ---
 
+		ua := req.UserAgent()
 		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
 			Print("[*] Received probe from %s for device '%s'. Awaiting WS handshake.", remoteIP, finalDeviceID)
 			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
@@ -258,7 +251,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			Print("[*] Received WebSocket handshake from %s for device '%s'.", remoteIP, finalDeviceID)
 
-			if settings.EnableDeviceIDAuth && deviceInfo.MaxSessions > 0 {
+			if settings.EnableDeviceIDAuth && found && deviceInfo.MaxSessions > 0 {
 				currentSessionCount := 0
 				activeConns.Range(func(key, value interface{}) bool {
 					c := value.(*ActiveConnInfo)
@@ -301,8 +294,14 @@ func handleClient(conn net.Conn, isTLS bool) {
 	if tcpTargetConn, ok := targetConn.(*net.TCPConn); ok { tcpTargetConn.SetKeepAlive(true); tcpTargetConn.SetKeepAlivePeriod(30 * time.Second) }
 	if len(initialData) > 0 { _, _ = targetConn.Write(initialData) }
 	ctx, cancel := context.WithCancel(context.Background()); var wg sync.WaitGroup; wg.Add(2)
-	go pipeTraffic(ctx, conn, targetConn, &wg, connKey, true)
-	go pipeTraffic(ctx, targetConn, conn, &wg, connKey, false)
+	
+	// --- [修复点2: 交换上传/下载的布尔标记] ---
+    // 从客户端(conn)读，往目标(targetConn)写 -> 上传 (isUpload = true)
+	go pipeTraffic(ctx, targetConn, conn, &wg, connKey, true) 
+    // 从目标(targetConn)读，往客户端(conn)写 -> 下载 (isUpload = false)
+	go pipeTraffic(ctx, conn, targetConn, &wg, connKey, false)
+    // --- [修复点2 结束] ---
+
 	wg.Wait(); cancel(); Print("[-] Closed connection for %s (Device: %s)", remoteIP, finalDeviceID)
 }
 
@@ -335,17 +334,9 @@ func pipeTraffic(ctx context.Context, dst, src net.Conn, wg *sync.WaitGroup, con
 func extractHeaderValue(text, name string) string { re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name))); m := re.FindStringSubmatch(text); if len(m) > 1 { return strings.TrimSpace(m[1]) }; return "" }
 func isIPInList(ip string, list []string) bool { for _, item := range list { if item == ip { return true } }; return false }
 
-// =================================================================
-// ------------------ SSH USER MGMT (SSH用户管理) ------------------
-// =================================================================
-
+// ... SSH用户管理, Web管理面板, main函数 ... (与上一版完全相同，保持不变)
 func runCommand(command string, args ...string) (bool, string) { cmd := exec.Command(command, args...); var out, stderr bytes.Buffer; cmd.Stdout = &out; cmd.Stderr = &stderr; err := cmd.Run(); if err != nil { return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String()) }; return true, out.String() }
 func manageSshUser(username, password, action string) (bool, string) { if os.Geteuid() != 0 { return false, "此操作需要 root 权限。" }; if !regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,30}$`).MatchString(username) { return false, "无效的用户名。请使用小写字母、数字、下划线或连字符。" }; sshdConfigPath := "/etc/ssh/sshd_config"; startMarker := fmt.Sprintf("# WSSUSER_BLOCK_START_%s", username); endMarker := fmt.Sprintf("# WSSUSER_BLOCK_END_%s", username); cleanSshdConfig := func() error { content, err := ioutil.ReadFile(sshdConfigPath); if err != nil { if os.IsNotExist(err) { return nil }; return err }; lines := strings.Split(string(content), "\n"); var newLines []string; inBlock := false; for _, line := range lines { if strings.Contains(line, startMarker) { inBlock = true; continue }; if strings.Contains(line, endMarker) { inBlock = false; continue }; if !inBlock { newLines = append(newLines, line) } }; return ioutil.WriteFile(sshdConfigPath, []byte(strings.Join(newLines, "\n")), 0644) }; restartSshd := func() (bool, string) { success, msg := runCommand("systemctl", "restart", "sshd"); if !success { success, msg = runCommand("systemctl", "restart", "ssh") }; return success, msg }; if action == "delete" { if err := cleanSshdConfig(); err != nil { return false, fmt.Sprintf("清理 sshd_config 失败: %v", err) }; cmd := exec.Command("id", username); if cmd.Run() == nil { delSuccess, msg := runCommand("userdel", "-r", username); if !delSuccess { return false, fmt.Sprintf("删除用户失败: %s", msg) } }; sshdRestartSuccess, msg := restartSshd(); if !sshdRestartSuccess { return false, fmt.Sprintf("SSHD/SSH 重启失败: %s", msg) }; return true, fmt.Sprintf("用户 %s 及相关配置已成功删除。", username) }; if action == "create" { if password == "" { return false, "创建用户时必须提供密码。" }; if err := cleanSshdConfig(); err != nil { return false, fmt.Sprintf("清理旧 sshd_config 失败: %v", err) }; cmd := exec.Command("id", username); if cmd.Run() != nil { addSuccess, msg := runCommand("useradd", "-m", "-s", "/bin/bash", username); if !addSuccess { return false, fmt.Sprintf("创建用户失败: %s", msg) } }; chpasswdCmd := exec.Command("chpasswd"); chpasswdCmd.Stdin = strings.NewReader(fmt.Sprintf("%s:%s", username, password)); if err := chpasswdCmd.Run(); err != nil { return false, fmt.Sprintf("设置密码失败: %v", err) }; f, err := os.OpenFile(sshdConfigPath, os.O_APPEND|os.O_WRONLY, 0644); if err != nil { return false, fmt.Sprintf("打开 sshd_config 失败: %v", err) }; newBlock := fmt.Sprintf("\n%s\nMatch User %s Address 127.0.0.1,::1\n    PasswordAuthentication yes\n    PermitTTY yes\n    AllowTcpForwarding yes\nMatch User %s Address *,!127.0.0.1,!::1\n    PasswordAuthentication no\n    PermitTTY no\n    AllowTcpForwarding no\n%s\n", startMarker, username, username, endMarker); _, _ = f.WriteString(newBlock); f.Close(); sshdRestartSuccess, msg := restartSshd(); if !sshdRestartSuccess { return false, fmt.Sprintf("SSHD/SSH 重启失败: %s", msg) }; return true, fmt.Sprintf("SSH 用户 '%s' 已成功创建/更新。", username) }; return false, "未知操作。" }
-
-// =================================================================
-// ------------------ ADMIN PANEL (Web管理面板) --------------------
-// =================================================================
-
 func basicAuth(handler http.HandlerFunc) http.HandlerFunc { return func(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); user, pass, ok := r.BasicAuth(); if !ok { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; cfg.lock.RLock(); storedPass, accountOk := cfg.Accounts[user]; cfg.lock.RUnlock(); if !accountOk { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; valid := false; if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") { valid = checkPasswordHash(pass, storedPass) } else { valid = (pass == storedPass) }; if !valid { w.Header().Set("WWW-Authenticate", `Basic realm="Restricted"`); http.Error(w, "Unauthorized.", http.StatusUnauthorized); return }; ctx := context.WithValue(r.Context(), "user", user); handler(w, r.WithContext(ctx)) } }
 func sendJSON(w http.ResponseWriter, code int, payload interface{}) { response, _ := json.Marshal(payload); w.Header().Set("Content-Type", "application/json"); w.WriteHeader(code); _, _ = w.Write(response) }
 func formatBytes(b int64) string { const unit = 1024; if b < unit { return fmt.Sprintf("%d B", b) }; div, exp := int64(unit), 0; for n := b / unit; n >= unit; n /= unit { div *= unit; exp++ }; return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp]) }
@@ -353,10 +344,6 @@ type APIConnectionResponse struct { DeviceID string `json:"device_id"`; Status s
 func handleAPI(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); var reqData map[string]interface{}; if r.Body != nil { body, err := ioutil.ReadAll(r.Body); if err == nil && len(body) > 0 { _ = json.Unmarshal(body, &reqData) } }; switch r.URL.Path { case "/api/connections": var conns []*ActiveConnInfo; activeConns.Range(func(key, value interface{}) bool { conns = append(conns, value.(*ActiveConnInfo)); return true }); sort.Slice(conns, func(i, j int) bool { statusOrder := map[string]int{"活跃": 0, "握手": 1}; if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }; return conns[i].FirstConnection.Before(conns[j].FirstConnection) }); resp := []APIConnectionResponse{}; now := time.Now(); for _, c := range conns { if c.Status == "活跃" { timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds(); if timeDelta >= 2 { currentTotalBytes := c.BytesSent + c.BytesReceived; bytesDelta := currentTotalBytes - c.LastTotalBytesForSpeed; if timeDelta > 0 { c.CurrentSpeedBps = float64(bytesDelta) / timeDelta }; c.LastSpeedUpdateTime = now; c.LastTotalBytesForSpeed = currentTotalBytes } }; remainingStr := "无限制"; deviceInfo, ok := cfg.GetDeviceIDs()[c.DeviceID]; if ok && deviceInfo.LimitGB > 0 { usage, _ := deviceUsage.Load(c.DeviceID); remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - usage.(int64); if remainingBytes < 0 { remainingBytes = 0 }; remainingStr = formatBytes(remainingBytes) }; resp = append(resp, APIConnectionResponse{ DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(c.BytesSent), RcvdStr: formatBytes(c.BytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: c.LastActive.Format("15:04:05"), ConnKey: c.ConnKey, }) }; sendJSON(w, http.StatusOK, resp); case "/api/kick": connKey, _ := reqData["conn_key"].(string); if conn, ok := GetActiveConn(connKey); ok { _ = conn.Writer.Close(); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "连接已踢掉"}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "连接未找到"}) }; case "/api/clear": connKey, _ := reqData["conn_key"].(string); RemoveActiveConn(connKey); sendJSON(w, http.StatusOK, map[string]string{"status": "ok"}); case "/api/device_usage": usageMap := make(map[string]int64); deviceUsage.Range(func(key, value interface{}) bool { usageMap[key.(string)] = value.(int64); return true }); sendJSON(w, http.StatusOK, usageMap); case "/api/logs": sendJSON(w, http.StatusOK, logBuffer.GetLogs()); case "/api/server_status": systemStatusMutex.RLock(); defer systemStatusMutex.RUnlock(); sendJSON(w, http.StatusOK, systemStatus); case "/api/devices": sendJSON(w, http.StatusOK, cfg.GetDeviceIDs()); case "/api/settings": sendJSON(w, http.StatusOK, cfg.GetSettings()); case "/api/settings/toggle_device_auth": enable, _ := reqData["enable"].(bool); cfg.lock.Lock(); cfg.Settings.EnableDeviceIDAuth = enable; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { statusText := "开启"; if !enable { statusText = "关闭" }; sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)}) }; case "/api/ssh/create", "/api/ssh/delete": action := filepath.Base(r.URL.Path); username, _ := reqData["username"].(string); password, _ := reqData["password"].(string); success, message := manageSshUser(username, password, action); status := "ok"; if !success { status = "error" }; sendJSON(w, http.StatusOK, map[string]string{"status": status, "message": message}); default: http.NotFound(w, r) } }
 func handleAdminPost(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(); var reqData map[string]interface{}; if json.NewDecoder(r.Body).Decode(&reqData) != nil { sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的JSON格式"}); return }; switch r.URL.Path { case "/device/add": did, _ := reqData["device_id"].(string); exp, _ := reqData["expiry"].(string); limitStr, _ := reqData["limit_gb"].(string); secWSKey, _ := reqData["sec_ws_key"].(string); maxSessionsRaw, hasMaxSessions := reqData["max_sessions"]; if did == "" || exp == "" || secWSKey == "" { sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "ID, 有效期, 和 Sec-WebSocket-Key 不能为空"}); return }; limit, _ := strconv.Atoi(limitStr); ms := 1; if hasMaxSessions { switch v := maxSessionsRaw.(type) { case float64: ms = int(v); case string: ms, _ = strconv.Atoi(v) }; if ms < 0 || ms > 5 { ms = 1 } }; cfg.lock.Lock(); currentUsage := int64(0); if oldInfo, ok := cfg.DeviceIDs[did]; ok { currentUsage = oldInfo.UsedBytes }; cfg.DeviceIDs[did] = DeviceInfo{ Expiry: exp, LimitGB: limit, UsedBytes: currentUsage, SecWSKey: secWSKey, MaxSessions: ms, }; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"}) }; case "/device/delete": did, _ := reqData["device_id"].(string); cfg.lock.Lock(); delete(cfg.DeviceIDs, did); cfg.lock.Unlock(); deviceUsage.Delete(did); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"}) }; case "/device/reset_traffic": did, _ := reqData["device_id"].(string); deviceUsage.Store(did, int64(0)); cfg.lock.Lock(); if info, ok := cfg.DeviceIDs[did]; ok { info.UsedBytes = 0; cfg.DeviceIDs[did] = info }; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }; case "/account/update": ou, _ := reqData["old_user"].(string); op, _ := reqData["old_pass"].(string); nu, _ := reqData["new_user"].(string); np, _ := reqData["new_pass"].(string); cfg.lock.RLock(); storedPass, ok := cfg.Accounts[ou]; cfg.lock.RUnlock(); if !ok { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"}); return }; valid := false; if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") { valid = checkPasswordHash(op, storedPass) } else { valid = (op == storedPass) }; if !valid { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原密码错误"}); return }; h, err := hashPassword(np); if err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "密码加密失败"}); return }; cfg.lock.Lock(); if ou != nu { delete(cfg.Accounts, ou) }; cfg.Accounts[nu] = h; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }; case "/settings/save": oldSettings := cfg.GetSettings(); oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}; var newSettings Settings; settingsBytes, _ := json.Marshal(reqData); _ = json.Unmarshal(settingsBytes, &newSettings); if wl, ok := reqData["ip_whitelist"].(string); ok { newSettings.IPWhitelist = strings.Split(wl, ",") }; if bl, ok := reqData["ip_blacklist"].(string); ok { newSettings.IPBlacklist = strings.Split(bl, ",") }; cfg.lock.Lock(); cfg.Settings = newSettings; cfg.lock.Unlock(); if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)}); return }; newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}; portsChanged := false; for i := range oldPorts { if oldPorts[i] != newPorts[i] { portsChanged = true; break } }; if portsChanged { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."}); go func() { time.Sleep(1 * time.Second); Print("[*] Port settings changed. Restarting server..."); executable, _ := os.Executable(); cmd := exec.Command(executable, os.Args[1:]...); cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin; if err := cmd.Start(); err != nil { Print("[!] FATAL: Failed to restart process: %v", err); os.Exit(1) }; os.Exit(0) }() } else { Print("[*] Settings updated and hot-reloaded successfully."); sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"}) } } }
 func handleAdminPage(w http.ResponseWriter, r *http.Request) { if r.URL.Path != "/" { http.NotFound(w, r); return }; user := r.Context().Value("user").(string); systemStatusMutex.RLock(); activeCount := 0; activeConns.Range(func(key, value interface{}) bool { if value.(*ActiveConnInfo).Status == "活跃" { activeCount++ }; return true }); memStr := "N/A"; if systemStatus.MemTotal > 0 { memStr = fmt.Sprintf("%.1f/%.1f GB (%.1f%%)", float64(systemStatus.MemUsed)/1073741824, float64(systemStatus.MemTotal)/1073741824, systemStatus.MemPercent) }; html := string(adminPanelHTML); html = strings.Replace(html, "__USER__", user, -1); html = strings.Replace(html, "__ACTIVE_COUNT__", strconv.Itoa(activeCount), -1); html = strings.Replace(html, "__GLOBAL_SENT__", formatBytes(systemStatus.BytesSent), -1); html = strings.Replace(html, "__GLOBAL_RECEIVED__", formatBytes(systemStatus.BytesReceived), -1); html = strings.Replace(html, "__UPTIME__", systemStatus.Uptime, -1); html = strings.Replace(html, "__CPU__", fmt.Sprintf("%.1f%%", systemStatus.CPUPercent), -1); html = strings.Replace(html, "__CPU_CORES__", strconv.Itoa(systemStatus.CPUCores), -1); html = strings.Replace(html, "__MEM__", memStr, -1); systemStatusMutex.RUnlock(); w.Header().Set("Content-Type", "text/html; charset=utf-8"); _, _ = w.Write([]byte(html)) }
-
-// =================================================================
-// ---------------------- MAIN (主函数) ---------------------------
-// =================================================================
 
 func main() {
 	log.SetOutput(ioutil.Discard)
