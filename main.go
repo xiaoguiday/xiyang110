@@ -12,6 +12,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	// --- [PPROF 集成 1] 导入pprof包 ---
+	_ "net/http/pprof"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,17 +30,36 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// =================================================================
-// 日志、配置等基础模块... (与上一版完全相同，保持不变)
-// =================================================================
 const logBufferSize = 200
-type RingBuffer struct { mu sync.RWMutex; buffer []string; head int }
+type RingBuffer struct {
+	mu     sync.RWMutex
+	buffer []string
+	head   int
+}
 func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{ buffer: make([]string, capacity), } }
-func (rb *RingBuffer) Add(msg string) { rb.mu.Lock(); defer rb.mu.Unlock(); logLine := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg); rb.buffer[rb.head] = logLine; rb.head = (rb.head + 1) % len(rb.buffer); fmt.Println(logLine) }
-func (rb *RingBuffer) GetLogs() []string { rb.mu.RLock(); defer rb.mu.RUnlock(); var logs []string; for i := 0; i < len(rb.buffer); i++ { idx := (rb.head + i) % len(rb.buffer); if rb.buffer[idx] != "" { logs = append(logs, rb.buffer[idx]) } }; for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 { logs[i], logs[j] = logs[j], logs[i] }; return logs }
+func (rb *RingBuffer) Add(msg string) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg)
+	rb.buffer[rb.head] = logLine
+	rb.head = (rb.head + 1) % len(rb.buffer)
+	fmt.Println(logLine)
+}
+func (rb *RingBuffer) GetLogs() []string {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	var logs []string
+	for i := 0; i < len(rb.buffer); i++ {
+		idx := (rb.head + i) % len(rb.buffer)
+		if rb.buffer[idx] != "" { logs = append(logs, rb.buffer[idx]) }
+	}
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 { logs[i], logs[j] = logs[j], logs[i] }
+	return logs
+}
 var logBuffer *RingBuffer
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
+
 var ConfigFile = "ws_config.json"
 type Settings struct { HTTPPort int `json:"http_port"`; TLSPort int `json:"tls_port"`; StatusPort int `json:"status_port"`; DefaultTargetHost string `json:"default_target_host"`; DefaultTargetPort int `json:"default_target_port"`; BufferSize int `json:"buffer_size"`; Timeout int `json:"timeout"`; CertFile string `json:"cert_file"`; KeyFile string `json:"key_file"`; UAKeywordWS string `json:"ua_keyword_ws"`; UAKeywordProbe string `json:"ua_keyword_probe"`; AllowSimultaneousConnections bool `json:"allow_simultaneous_connections"`; DefaultExpiryDays int `json:"default_expiry_days"`; DefaultLimitGB int `json:"default_limit_gb"`; IPWhitelist []string `json:"ip_whitelist"`; IPBlacklist []string `json:"ip_blacklist"`; EnableIPWhitelist bool `json:"enable_ip_whitelist"`; EnableIPBlacklist bool `json:"enable_ip_blacklist"`; EnableDeviceIDAuth bool `json:"enable_device_id_auth"` }
 type DeviceInfo struct { Expiry string `json:"expiry"`; LimitGB int `json:"limit_gb"`; UsedBytes int64 `json:"used_bytes"`; SecWSKey string `json:"sec_ws_key"`; MaxSessions int `json:"max_sessions"` }
@@ -56,21 +77,32 @@ func hashPassword(password string) (string, error) { bytes, err := bcrypt.Genera
 func checkPasswordHash(password, hash string) bool { err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); return err == nil }
 func (c *Config) FindDeviceByWSKey(wsKey string) (deviceID string, deviceInfo DeviceInfo, found bool) { c.lock.RLock(); defer c.lock.RUnlock(); for id, info := range c.DeviceIDs { if info.SecWSKey != "" && info.SecWSKey == wsKey { return id, info, true } }; return "", DeviceInfo{}, false }
 
-type ActiveConnInfo struct { Writer net.Conn; LastActive time.Time; DeviceID string; FirstConnection time.Time; Status string; IP string; BytesSent int64; BytesReceived int64; ConnKey string; LastSpeedUpdateTime time.Time; LastTotalBytesForSpeed int64; CurrentSpeedBps float64 }
-type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
-var ( globalBytesSent int64; globalBytesReceived int64; activeConns sync.Map; deviceUsage sync.Map; startTime = time.Now(); systemStatus SystemStatus; systemStatusMutex sync.RWMutex; adminPanelHTML []byte )
-
-// --- [崩溃修复 1] ---
-func InitMetrics() {
-	cfg := GetConfig()
-	devices := cfg.GetDeviceIDs()
-	for id, info := range devices {
-		// 必须存入指针类型
-		initialUsage := info.UsedBytes
-		deviceUsage.Store(id, &initialUsage)
-	}
+type ActiveConnInfo struct {
+	Writer                 net.Conn
+	LastActive             time.Time
+	DeviceID               string
+	FirstConnection        time.Time
+	Status                 string
+	IP                     string
+	BytesSent              int64
+	BytesReceived          int64
+	ConnKey                string
+	LastSpeedUpdateTime    time.Time
+	LastTotalBytesForSpeed int64
+	CurrentSpeedBps        float64
 }
-
+type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
+var (
+	globalBytesSent     int64
+	globalBytesReceived int64
+	activeConns         sync.Map
+	deviceUsage         sync.Map
+	startTime           = time.Now()
+	systemStatus        SystemStatus
+	systemStatusMutex   sync.RWMutex
+	adminPanelHTML      []byte
+)
+func InitMetrics() { cfg := GetConfig(); devices := cfg.GetDeviceIDs(); for id, info := range devices { initialUsage := info.UsedBytes; deviceUsage.Store(id, &initialUsage) } }
 func AddActiveConn(key string, conn *ActiveConnInfo) { activeConns.Store(key, conn) }
 func RemoveActiveConn(key string) { activeConns.Delete(key) }
 func GetActiveConn(key string) (*ActiveConnInfo, bool) { if val, ok := activeConns.Load(key); ok { return val.(*ActiveConnInfo), true }; return nil, false }
@@ -100,19 +132,9 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.EnableDeviceIDAuth {
 			if !found { Print("[!] Auth Enabled: Invalid or missing Sec-WebSocket-Key from %s. Rejecting.", remoteIP); _, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n")); return }
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry); if err != nil || time.Now().After(expiry.Add(24*time.Hour)) { Print("[!] Auth Enabled: Device ID %s has expired. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
-			
-            // --- [崩溃修复 2] ---
 			var deviceUsagePtr *int64
-			if val, ok := deviceUsage.Load(finalDeviceID); ok {
-				deviceUsagePtr = val.(*int64)
-			} else {
-				// 如果设备是新设备，map里没有它的流量记录，我们需要创建一个新的计数器（指针）
-				newUsage := deviceInfo.UsedBytes // 使用配置中的值作为初始值
-				deviceUsage.Store(finalDeviceID, &newUsage)
-				deviceUsagePtr = &newUsage
-			}
+			if val, ok := deviceUsage.Load(finalDeviceID); ok { deviceUsagePtr = val.(*int64) } else { newUsage := deviceInfo.UsedBytes; deviceUsage.Store(finalDeviceID, &newUsage); deviceUsagePtr = &newUsage }
 			if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 { Print("[!] Auth Enabled: Traffic limit reached for %s. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
-
 		} else { if !found { finalDeviceID = remoteIP } }
 		if connInfo, ok := GetActiveConn(connKey); ok { connInfo.DeviceID = finalDeviceID }
 		ua := req.UserAgent()
@@ -182,6 +204,14 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) { cfg := GetConfig(
 func handleAdminPage(w http.ResponseWriter, r *http.Request) { if r.URL.Path != "/" { http.NotFound(w, r); return }; user := r.Context().Value("user").(string); systemStatusMutex.RLock(); activeCount := 0; activeConns.Range(func(key, value interface{}) bool { if value.(*ActiveConnInfo).Status == "活跃" { activeCount++ }; return true }); memStr := "N/A"; if systemStatus.MemTotal > 0 { memStr = fmt.Sprintf("%.1f/%.1f GB (%.1f%%)", float64(systemStatus.MemUsed)/1073741824, float64(systemStatus.MemTotal)/1073741824, systemStatus.MemPercent) }; html := string(adminPanelHTML); html = strings.Replace(html, "__USER__", user, -1); html = strings.Replace(html, "__ACTIVE_COUNT__", strconv.Itoa(activeCount), -1); html = strings.Replace(html, "__GLOBAL_SENT__", formatBytes(atomic.LoadInt64(&globalBytesSent)), -1); html = strings.Replace(html, "__GLOBAL_RECEIVED__", formatBytes(atomic.LoadInt64(&globalBytesReceived)), -1); html = strings.Replace(html, "__UPTIME__", systemStatus.Uptime, -1); html = strings.Replace(html, "__CPU__", fmt.Sprintf("%.1f%%", systemStatus.CPUPercent), -1); html = strings.Replace(html, "__CPU_CORES__", strconv.Itoa(systemStatus.CPUCores), -1); html = strings.Replace(html, "__MEM__", memStr, -1); systemStatusMutex.RUnlock(); w.Header().Set("Content-Type", "text/html; charset=utf-8"); _, _ = w.Write([]byte(html)) }
 
 func main() {
+	go func() {
+		log.Println("Starting pprof server on http://localhost:6060/debug/pprof")
+		err := http.ListenAndServe("localhost:6060", nil)
+		if err != nil {
+			Print("[!] PPROF: Failed to start pprof server: %v", err)
+		}
+	}()
+	
 	log.SetOutput(ioutil.Discard)
 	var err error
 	adminPanelHTML, err = ioutil.ReadFile("admin.html")
