@@ -28,7 +28,7 @@ import (
 )
 
 // =================================================================
-// ---------------------- LOGGER (日志模块) -------------------------
+// 日志、配置、监控等模块... (与上一版完全相同，保持不变)
 // =================================================================
 
 const logBufferSize = 200
@@ -60,10 +60,6 @@ func (rb *RingBuffer) GetLogs() []string {
 var logBuffer *RingBuffer
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
-
-// =================================================================
-// ---------------------- CONFIG (配置模块) -------------------------
-// =================================================================
 
 var ConfigFile = "ws_config.json"
 type Settings struct {
@@ -147,10 +143,6 @@ func (c *Config) FindDeviceByWSKey(wsKey string) (deviceID string, deviceInfo De
 	return "", DeviceInfo{}, false
 }
 
-// =================================================================
-// ---------------------- METRICS (监控模块) ------------------------
-// =================================================================
-
 type ActiveConnInfo struct { Writer net.Conn `json:"-"`; LastActive time.Time `json:"last_active_time"`; DeviceID string `json:"device_id"`; FirstConnection time.Time `json:"first_connection_time"`; Status string `json:"status"`; IP string `json:"ip"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"`; ConnKey string `json:"conn_key"`; LastSpeedUpdateTime time.Time `json:"-"`; LastTotalBytesForSpeed int64 `json:"-"`; CurrentSpeedBps float64 `json:"-"` }
 type SystemStatus struct { Uptime string `json:"uptime"`; CPUPercent float64 `json:"cpu_percent"`; CPUCores int `json:"cpu_cores"`; MemTotal uint64 `json:"mem_total"`; MemUsed uint64 `json:"mem_used"`; MemPercent float64 `json:"mem_percent"`; BytesSent int64 `json:"bytes_sent"`; BytesReceived int64 `json:"bytes_received"` }
 var ( globalBytesSent int64; globalBytesReceived int64; activeConns sync.Map; deviceUsage sync.Map; startTime = time.Now(); systemStatus SystemStatus; systemStatusMutex sync.RWMutex; adminPanelHTML []byte )
@@ -173,49 +165,33 @@ func handleClient(conn net.Conn, isTLS bool) {
 	settings := cfg.GetSettings()
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
-
-	if tcpConn, ok := conn.(*net.TCPConn); ok {
-		tcpConn.SetKeepAlive(true)
-		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-	}
-
+	if tcpConn, ok := conn.(*net.TCPConn); ok { tcpConn.SetKeepAlive(true); tcpConn.SetKeepAlivePeriod(30 * time.Second) }
 	if settings.EnableIPBlacklist && isIPInList(remoteIP, settings.IPBlacklist) { Print("[-] Connection from blacklisted IP %s rejected.", remoteIP); return }
 	if settings.EnableIPWhitelist && !isIPInList(remoteIP, settings.IPWhitelist) { Print("[-] Connection from non-whitelisted IP %s rejected.", remoteIP); return }
-	
 	tlsStr := ""; if isTLS { tlsStr = " (TLS)" }; Print("[+] Connection from %s%s", remoteIP, tlsStr)
-	
 	AddActiveConn(connKey, &ActiveConnInfo{ Writer: conn, LastActive: time.Now(), FirstConnection: time.Now(), Status: "握手", IP: remoteIP, ConnKey: connKey })
 	defer RemoveActiveConn(connKey)
-
 	reader := bufio.NewReader(conn)
 	forwardingStarted := false
 	var initialData []byte
 	var headersText string
-	
 	var finalDeviceID string
 	var deviceInfo DeviceInfo
-
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(settings.Timeout) * time.Second))
-
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if err != io.EOF { Print("[-] Handshake read error from %s: %v", remoteIP, err) } else { Print("[-] Client %s closed connection during handshake.", remoteIP) }
 			return
 		}
-
 		var headerBuilder strings.Builder
 		_ = req.Header.Write(&headerBuilder)
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
 		body, _ := ioutil.ReadAll(req.Body)
 		initialData = body
-        
 		clientWSKey := req.Header.Get("Sec-WebSocket-Key")
 		var found bool
-		if clientWSKey != "" {
-			finalDeviceID, deviceInfo, found = cfg.FindDeviceByWSKey(clientWSKey)
-		}
-		
+		if clientWSKey != "" { finalDeviceID, deviceInfo, found = cfg.FindDeviceByWSKey(clientWSKey) }
 		if settings.EnableDeviceIDAuth {
 			if !found {
 				Print("[!] Auth Enabled: Invalid or missing Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
@@ -223,44 +199,26 @@ func handleClient(conn net.Conn, isTLS bool) {
 				return
 			}
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
-			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
-				Print("[!] Auth Enabled: Device ID %s has expired. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-				return
-			}
+			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) { Print("[!] Auth Enabled: Device ID %s has expired. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
 			usage, _ := deviceUsage.LoadOrStore(finalDeviceID, int64(0))
-			if deviceInfo.LimitGB > 0 && usage.(int64) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
-				Print("[!] Auth Enabled: Traffic limit reached for %s. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-				return
-			}
+			if deviceInfo.LimitGB > 0 && usage.(int64) >= int64(deviceInfo.LimitGB)*1024*1024*1024 { Print("[!] Auth Enabled: Traffic limit reached for %s. Rejecting.", finalDeviceID); _, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n")); return }
 		} else {
-			if !found {
-				finalDeviceID = remoteIP
-			}
+			if !found { finalDeviceID = remoteIP }
 		}
-        
-		if connInfo, ok := GetActiveConn(connKey); ok {
-			connInfo.DeviceID = finalDeviceID
-		}
-
+		if connInfo, ok := GetActiveConn(connKey); ok { connInfo.DeviceID = finalDeviceID }
 		ua := req.UserAgent()
 		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
 			Print("[*] Received probe from %s for device '%s'. Awaiting WS handshake.", remoteIP, finalDeviceID)
 			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 			continue
 		}
-
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			Print("[*] Received WebSocket handshake from %s for device '%s'.", remoteIP, finalDeviceID)
-
 			if settings.EnableDeviceIDAuth && found && deviceInfo.MaxSessions > 0 {
 				currentSessionCount := 0
 				activeConns.Range(func(key, value interface{}) bool {
 					c := value.(*ActiveConnInfo)
-					if c.DeviceID == finalDeviceID && c.Status == "活跃" {
-						currentSessionCount++
-					}
+					if c.DeviceID == finalDeviceID && c.Status == "活跃" { currentSessionCount++ }
 					return true
 				})
 				if currentSessionCount >= deviceInfo.MaxSessions {
@@ -269,11 +227,8 @@ func handleClient(conn net.Conn, isTLS bool) {
 					return
 				}
 			}
-
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-			if connInfo, ok := GetActiveConn(connKey); ok {
-				connInfo.Status = "活跃"
-			}
+			if connInfo, ok := GetActiveConn(connKey); ok { connInfo.Status = "活跃" }
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
@@ -281,7 +236,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 			return
 		}
 	}
-
 	_ = conn.SetReadDeadline(time.Time{})
 	targetHost := settings.DefaultTargetHost; targetPort := settings.DefaultTargetPort
 	if realHost := extractHeaderValue(headersText, "x-real-host"); realHost != "" {
@@ -297,34 +251,46 @@ func handleClient(conn net.Conn, isTLS bool) {
 	if tcpTargetConn, ok := targetConn.(*net.TCPConn); ok { tcpTargetConn.SetKeepAlive(true); tcpTargetConn.SetKeepAlivePeriod(30 * time.Second) }
 	if len(initialData) > 0 { _, _ = targetConn.Write(initialData) }
 	ctx, cancel := context.WithCancel(context.Background()); var wg sync.WaitGroup; wg.Add(2)
-	
 	go pipeTraffic(ctx, targetConn, conn, &wg, connKey, true) 
 	go pipeTraffic(ctx, conn, targetConn, &wg, connKey, false)
-
 	wg.Wait(); cancel(); Print("[-] Closed connection for %s (Device: %s)", remoteIP, finalDeviceID)
 }
 
+// --- [CPU 性能修复] ---
 func pipeTraffic(ctx context.Context, dst, src net.Conn, wg *sync.WaitGroup, connKey string, isUpload bool) {
-	defer wg.Done(); cfg := GetConfig(); buffer := make([]byte, cfg.GetSettings().BufferSize)
+	defer wg.Done()
+	cfg := GetConfig()
+	buffer := make([]byte, cfg.GetSettings().BufferSize)
+
 	for {
+		n, err := src.Read(buffer)
+
 		select {
-		case <-ctx.Done(): return
+		case <-ctx.Done():
+			return
 		default:
-			n, err := src.Read(buffer)
-			if n > 0 {
-				_, writeErr := dst.Write(buffer[:n])
-				if writeErr != nil { return }
-				connInfo, ok := GetActiveConn(connKey)
-				if !ok { return }
-				if isUpload {
-					UpdateConnTraffic(connKey, int64(n), 0, connInfo.DeviceID)
-				} else {
-					UpdateConnTraffic(connKey, 0, int64(n), connInfo.DeviceID)
-				}
+		}
+		
+		if err != nil {
+			if tcpConn, ok := dst.(*net.TCPConn); ok {
+				_ = tcpConn.CloseWrite()
 			}
-			if err != nil {
-				if tcpConn, ok := dst.(*net.TCPConn); ok { _ = tcpConn.CloseWrite() }
+			return
+		}
+
+		if n > 0 {
+			_, writeErr := dst.Write(buffer[:n])
+			if writeErr != nil {
 				return
+			}
+			connInfo, ok := GetActiveConn(connKey)
+			if !ok {
+				return
+			}
+			if isUpload {
+				UpdateConnTraffic(connKey, int64(n), 0, connInfo.DeviceID)
+			} else {
+				UpdateConnTraffic(connKey, 0, int64(n), connInfo.DeviceID)
 			}
 		}
 	}
