@@ -31,7 +31,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ... 所有基础模块 (RingBuffer, Config, Metrics, pipeTraffic等) 保持不变 ...
 const logBufferSize = 200
 type RingBuffer struct { mu sync.RWMutex; buffer []string; head int }
 func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{ buffer: make([]string, capacity), } }
