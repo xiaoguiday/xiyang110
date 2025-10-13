@@ -47,20 +47,17 @@
         try {
             const response = await fetch(url, options);
             if (response.status === 401) {
-                // 如果是 GET 请求收到 401，说明 session 失效，直接刷新页面，后端会触发登录
-                if (options.method === 'GET' || !options.method) {
+                if (url !== '/logout') { 
                     window.location.reload();
                 }
-                // 对于 POST 请求，让调用者自己处理
                 throw new Error(`Unauthorized`);
             }
             if (!response.ok) { throw new Error(`HTTP error! status: ${response.status}`); }
-            // 登出接口没有JSON返回体
             if (url === '/logout') return {status: 'ok'}; 
             return await response.json();
         } catch (error) {
             console.error(`API request to ${url} failed:`, error);
-            if (options.method === 'POST') alert(`操作失败: ${error.message}`);
+            if (options.method === 'POST' && url !=='/logout') alert(`操作失败: ${error.message}`);
             return null;
         }
     }
@@ -146,9 +143,10 @@
     
     async function updateAccount() { const d = { old_user: gid("old_user").value, old_pass: gid("old_pass").value, new_user: gid("new_user").value, new_pass: gid("new_pass").value }; if (Object.values(d).some(v => !v)) return alert("请完整填写"); const r = await post("/account/update", d); if (r) { alert(r.message); if (r.status === 'ok') { logout("密码已更新，请重新登录。"); } } }
     
-    function logout() {
+    function logout(message = "正在安全退出...") {
+        document.body.innerHTML = `<h1>${message}</h1>`;
         post("/logout").finally(() => {
-            window.location.href = "/";
+            setTimeout(() => { window.location.href = "/"; }, 1500);
         });
     }
 
@@ -170,27 +168,29 @@
     
     async function initializeApp() {
         contentArea.innerHTML = `<div class="card">正在初始化应用...</div>`;
-
-        // 在所有API请求之前，先拿到用户名
-        // 我们通过向根路径发一个HEAD请求来做到这一点，后端中间件会返回用户名
-        try {
-            const userResponse = await fetch('/', { method: 'HEAD' });
-            appState.currentUser = userResponse.headers.get('X-WST-User') || 'user';
-        } catch(e) {
-            // 如果失败，可能是网络问题或认证失效
-            window.location.reload();
-            return;
-        }
         
+        // --- [UI修复] ---
+        // 从meta标签读取用户名，这是最可靠的方法
+        const userMeta = document.querySelector('meta[name="user-context"]');
+        if (userMeta) {
+            appState.currentUser = userMeta.content;
+        } else {
+            // 如果meta标签因为某些原因不存在，提供一个备用值
+            appState.currentUser = "user";
+        }
         gid('current-user').textContent = appState.currentUser;
 
+
         const [devices, usage, settings] = await Promise.all([get('/api/devices'), get('/api/device_usage'), get('/api/settings')]);
-        appState.devices = devices || {}; appState.usage = usage || {}; appState.settings = settings;
+        appState.devices = devices || {}; 
+        appState.usage = usage || {}; 
+        appState.settings = settings;
         
         if (activeIntervals.length > 0) activeIntervals.forEach(clearInterval);
         activeIntervals.push(setInterval(updateDynamicData, 3000));
         
         if (!window.location.hash) { window.location.hash = '#/status'; }
+        
         router();
         updateDynamicData();
     }
