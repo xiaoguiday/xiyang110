@@ -128,7 +128,6 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	// Set default settings
 	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 8192, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
 	c.Accounts = map[string]string{"admin": "admin"}
 	c.DeviceIDs = make(map[string]DeviceInfo)
@@ -142,7 +141,6 @@ func (c *Config) load() error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	// --- MIGRATION LOGIC (REWRITTEN) ---
 	var rawConfig map[string]interface{}
 	if err := json.Unmarshal(data, &rawConfig); err != nil {
 		return fmt.Errorf("could not decode raw config for migration check: %w", err)
@@ -170,12 +168,10 @@ func (c *Config) load() error {
 		finalData = migratedData
 	}
 
-	// Unmarshal the final (potentially migrated) data into the struct
 	if err := json.Unmarshal(finalData, c); err != nil {
 		return fmt.Errorf("could not decode final config file: %w", err)
 	}
 	
-	// If we changed it, save it back to the file in a pretty format
 	if changed {
 		 if err := c.save(); err != nil {
 			  Print("[!] Warning: failed to save migrated config file: %v", err)
@@ -213,7 +209,8 @@ func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
 	defer c.lock.RUnlock()
 	devices := make(map[string]DeviceInfo)
 	for k, v := range c.DeviceIDs {
-		if v.MaxSessions == 0 {
+		// FIX: Ensure MaxSessions is at least 1 when read.
+		if v.MaxSessions < 1 {
 			v.MaxSessions = 1
 		}
 		devices[k] = v
@@ -295,56 +292,82 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// FINAL VERSION of the audit function
 func auditActiveConnections() {
-	cfg := GetConfig()
-	settings := cfg.GetSettings()
-	devices := cfg.GetDeviceIDs()
+    cfg := GetConfig()
+    settings := cfg.GetSettings()
+    devices := cfg.GetDeviceIDs()
+    sessionsByDeviceID := make(map[string][]*ActiveConnInfo)
 
-	activeConns.Range(func(key, value interface{}) bool {
-		connInfo := value.(*ActiveConnInfo)
+    // First pass: Audit individual connections and group them by Device ID
+    activeConns.Range(func(key, value interface{}) bool {
+        connInfo := value.(*ActiveConnInfo)
+        
+        // Audit 1: IP Blacklist
+        if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
+            Print("[-] Kicking active connection from blacklisted IP %s (Device: %s)", connInfo.IP, connInfo.DeviceID)
+            connInfo.Writer.Close()
+            return true
+        }
 
-		// 1. Check against IP Blacklist
-		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
-			Print("[-] Kicking active connection from blacklisted IP %s (Device: %s)", connInfo.IP, connInfo.DeviceID)
-			connInfo.Writer.Close()
-			return true 
-		}
+        if connInfo.DeviceID != "" && connInfo.DeviceID != connInfo.IP {
+            if devInfo, ok := devices[connInfo.DeviceID]; ok {
+                // Audit 2: Device Disabled
+                if !devInfo.Enabled {
+                    Print("[-] Kicking active connection from disabled device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
+                    connInfo.Writer.Close()
+                    return true
+                }
 
-		if connInfo.DeviceID != "" && connInfo.DeviceID != connInfo.IP {
-			if devInfo, ok := devices[connInfo.DeviceID]; ok {
-				// 2. Check if the device has been disabled
-				if !devInfo.Enabled {
-					Print("[-] Kicking active connection from disabled device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
-					connInfo.Writer.Close()
-					return true 
-				}
+                // Audit 3: Device Expired
+                expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
+                if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
+                    Print("[-] Kicking active connection from expired device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
+                    connInfo.Writer.Close()
+                    return true
+                }
 
-				// 3. Check for expiration
-				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
-				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
-					Print("[-] Kicking active connection from expired device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
-					connInfo.Writer.Close()
-					return true
-				}
+                // Audit 4: Traffic Limit Exceeded
+                if devInfo.LimitGB > 0 {
+                    if usageVal, usageOk := deviceUsage.Load(connInfo.DeviceID); usageOk {
+                        currentUsage := atomic.LoadInt64(usageVal.(*int64))
+                        if currentUsage >= int64(devInfo.LimitGB)*1024*1024*1024 {
+                            Print("[-] Kicking active connection from device %s, traffic limit exceeded (IP: %s)", connInfo.DeviceID, connInfo.IP)
+                            connInfo.Writer.Close()
+                            return true
+                        }
+                    }
+                }
+                
+                // If the connection is valid, add it to the map for session limit check
+                sessionsByDeviceID[connInfo.DeviceID] = append(sessionsByDeviceID[connInfo.DeviceID], connInfo)
+            }
+        }
+        return true
+    })
 
-				// 4. Check for traffic limit exceeded
-				if devInfo.LimitGB > 0 {
-					if usageVal, usageOk := deviceUsage.Load(connInfo.DeviceID); usageOk {
-						currentUsage := atomic.LoadInt64(usageVal.(*int64))
-						limitBytes := int64(devInfo.LimitGB) * 1024 * 1024 * 1024
-						if currentUsage >= limitBytes {
-							Print("[-] Kicking active connection from device %s, traffic limit exceeded (IP: %s)", connInfo.DeviceID, connInfo.IP)
-							connInfo.Writer.Close()
-							return true
-						}
-					}
-				}
-			}
-		}
+    // Second pass: Check for session limit violations for each device ID
+    for deviceID, sessions := range sessionsByDeviceID {
+        if devInfo, ok := devices[deviceID]; ok {
+            effectiveMaxSessions := devInfo.MaxSessions
+            if !settings.AllowSimultaneousConnections {
+                effectiveMaxSessions = 1
+            }
 
-		return true
-	})
+            if len(sessions) > effectiveMaxSessions {
+                // Sort sessions by connection time, oldest first
+                sort.Slice(sessions, func(i, j int) bool {
+                    return sessions[i].FirstConnection.Before(sessions[j].FirstConnection)
+                })
+
+                // Kick the oldest sessions that exceed the limit
+                sessionsToKick := len(sessions) - effectiveMaxSessions
+                for i := 0; i < sessionsToKick; i++ {
+                    Print("[-] Kicking oldest session for device %s to enforce session limit (%d/%d)", deviceID, len(sessions)-i-1, effectiveMaxSessions)
+                    sessions[i].Writer.Close()
+                }
+            }
+        }
+    }
 }
 
 
@@ -518,19 +541,26 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			Print("[*] Received WebSocket handshake from %s for device '%s'.", remoteIP, finalDeviceID)
-			if settings.EnableDeviceIDAuth && found && deviceInfo.MaxSessions > 0 {
-				currentSessionCount := 0
-				activeConns.Range(func(key, value interface{}) bool {
-					c := value.(*ActiveConnInfo)
-					if c.DeviceID == finalDeviceID && c.Status == "活跃" {
-						currentSessionCount++
+			if settings.EnableDeviceIDAuth && found {
+				effectiveMaxSessions := deviceInfo.MaxSessions
+				if !settings.AllowSimultaneousConnections {
+					effectiveMaxSessions = 1
+				}
+
+				if effectiveMaxSessions > 0 {
+					currentSessionCount := 0
+					activeConns.Range(func(key, value interface{}) bool {
+						c := value.(*ActiveConnInfo)
+						if c.DeviceID == finalDeviceID && c.Status == "活跃" {
+							currentSessionCount++
+						}
+						return true
+					})
+					if currentSessionCount >= effectiveMaxSessions {
+						Print("[!] Max sessions reached for device %s (%d/%d). Rejecting new connection.", finalDeviceID, currentSessionCount, effectiveMaxSessions)
+						_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+						return
 					}
-					return true
-				})
-				if currentSessionCount >= deviceInfo.MaxSessions {
-					Print("[!] Max sessions reached for device %s (%d/%d). Rejecting new connection.", finalDeviceID, currentSessionCount, deviceInfo.MaxSessions)
-					_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
-					return
 				}
 			}
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
@@ -847,7 +877,6 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	_, _ = w.Write(response)
 }
 
-// RE-ADDED: formatBytes function definition
 func formatBytes(b int64) string {
 	const unit = 1024
 	if b < unit {
@@ -861,7 +890,6 @@ func formatBytes(b int64) string {
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-// RE-ADDED: APIConnectionResponse struct definition
 type APIConnectionResponse struct {
 	DeviceID     string `json:"device_id"`
 	Status       string `json:"status"`
@@ -1019,8 +1047,9 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			case string:
 				ms, _ = strconv.Atoi(v)
 			}
-			if ms < 0 {
-				ms = 1 // Or some other default/error handling
+			// FIX: Ensure MaxSessions is at least 1
+			if ms < 1 {
+				ms = 1
 			}
 		}
 		cfg.lock.Lock()
@@ -1028,7 +1057,6 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		if oldInfo, ok := cfg.DeviceIDs[did]; ok {
 			currentUsage = oldInfo.UsedBytes
 		}
-		// NEW: New devices are enabled by default.
 		cfg.DeviceIDs[did] = DeviceInfo{Expiry: exp, LimitGB: limit, UsedBytes: currentUsage, SecWSKey: secWSKey, MaxSessions: ms, Enabled: true}
 		cfg.lock.Unlock()
 		if err := cfg.SafeSave(); err != nil {
@@ -1036,7 +1064,6 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		} else {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
 		}
-	// NEW API ENDPOINT
 	case "/device/set_status":
 		did, ok1 := reqData["device_id"].(string)
 		enabled, ok2 := reqData["enabled"].(bool)
@@ -1258,7 +1285,6 @@ func main() {
 	adminMux.HandleFunc("/login", loginHandler)
 	adminMux.HandleFunc("/logout", logoutHandler)
 
-	// 将所有API端点也保护起来
 	apiHandler := http.HandlerFunc(handleAPI)
 	adminPostHandler := http.HandlerFunc(handleAdminPost)
 	adminMux.Handle("/api/", authMiddleware(apiHandler))
