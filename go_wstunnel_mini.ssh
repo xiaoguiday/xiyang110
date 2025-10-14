@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# =================================================================
+# WSTunnel-Go 全自动静默安装/更新脚本 (生产版)
+# 作者: xiaoguidays
+# 更新时间: 2025-10-15
+# 版本: 1.3
+# 更新内容: 增加静默执行和优化编译选项，去除符号表和调试信息。
+# =================================================================
+
+set -e # 任何命令失败，脚本立即退出
+
+# --- 脚本设置 ---
+# 颜色代码
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# 项目配置
+GO_VERSION="1.22.3"
+PROJECT_DIR="/usr/local/src/go_wstunnel"
+GITHUB_REPO="xiaoguiday/xiyang110"
+SERVICE_NAME="wstunnel"
+BINARY_NAME="wstunnel-go"
+DEPLOY_DIR="/usr/local/bin"
+
+# --- 函数定义 ---
+info() { echo -e "${GREEN}[INFO] $1${NC}"; }
+error_exit() { echo -e "${RED}[ERROR] $1${NC}"; exit 1; }
+
+# --- 脚本主逻辑 ---
+
+# 1. 权限检查
+info "Step 1: Checking for root privileges..."
+if [ "$(id -u)" != "0" ]; then
+   error_exit "This script must be run as root. Please use 'sudo' or run as the root user."
+fi
+
+# 2. 安装必要的工具 (静默模式)
+info "Step 2: Installing required tools (wget, curl, tar, git)..."
+apt-get update -y > /dev/null 2>&1
+apt-get install -y wget curl tar git > /dev/null 2>&1 || error_exit "Failed to install required tools!"
+
+# 3. 安装 Go 语言环境 (静默模式)
+info "Step 3: Checking and installing Go environment..."
+if ! command -v go &> /dev/null || [[ ! $(go version) == *"go${GO_VERSION}"* ]]; then
+    info "Go environment not found or version mismatch. Installing Go ${GO_VERSION}..."
+    wget -q -O go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" || error_exit "Failed to download Go package!"
+    rm -rf /usr/local/go && tar -C /usr/local -xzf go.tar.gz > /dev/null 2>&1 || error_exit "Failed to extract Go package!"
+    rm go.tar.gz
+
+    if ! grep -q "/usr/local/go/bin" /etc/profile; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+    fi
+    export PATH=$PATH:/usr/local/go/bin
+fi
+if ! command -v go &> /dev/null; then
+    error_exit "Go command is not available. Try running 'source /etc/profile' and re-run the script."
+fi
+
+# 4. 创建项目目录并拉取文件 (静默模式)
+info "Step 4: Preparing project directory and fetching source code..."
+mkdir -p "$PROJECT_DIR"
+cd "$PROJECT_DIR" || error_exit "Failed to enter project directory '$PROJECT_DIR'!"
+
+wget -q -O main.go "https://raw.githubusercontent.com/${GITHUB_REPO}/main/main.go" || error_exit "Failed to download main.go!"
+wget -q -O admin.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/admin.html" || error_exit "Failed to download admin.html!"
+wget -q -O login.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/login.html" || error_exit "Failed to download login.html!"
+
+# 5. 编译项目 (优化编译选项)
+info "Step 5: Compiling the project with optimizations..."
+if [ ! -f "go.mod" ]; then
+    go mod init wstunnel > /dev/null 2>&1 || error_exit "go mod init failed!"
+fi
+go mod tidy > /dev/null 2>&1 || error_exit "go mod tidy failed!"
+
+# --- [核心改动] ---
+# 使用 -ldflags "-s -w" 来去除符号表和调试信息
+go build -ldflags "-s -w" -o ${BINARY_NAME} || error_exit "Compilation failed!"
+info "Project compiled successfully."
+
+# 6. 部署文件
+info "Step 6: Deploying files to ${DEPLOY_DIR}/ ..."
+mv ./${BINARY_NAME} ${DEPLOY_DIR}/ || error_exit "Failed to move ${BINARY_NAME}!"
+mv ./admin.html ${DEPLOY_DIR}/ || error_exit "Failed to move admin.html!"
+mv ./login.html ${DEPLOY_DIR}/ || error_exit "Failed to move login.html!"
+
+# 7. 创建并启用 systemd 服务
+SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+info "Step 7: Configuring systemd service..."
+cat > "$SERVICE_FILE" <<EOT
+[Unit]
+Description=WSTunnel-Go Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=${DEPLOY_DIR}
+ExecStart=${DEPLOY_DIR}/${BINARY_NAME}
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOT
+
+systemctl daemon-reload || error_exit "systemctl daemon-reload failed!"
+systemctl enable ${SERVICE_NAME}.service > /dev/null 2>&1 || error_exit "systemctl enable failed!"
+
+# 8. 启动/重启服务并检查状态
+info "Step 8: Starting/Restarting the service..."
+systemctl restart ${SERVICE_NAME}.service || error_exit "Service start/restart failed!"
+info "Operation successful."
+echo " "
+
+# 最终确认
+info "🎉 Success! WSTunnel-Go has been installed/updated and is running."
+info "Checking final service status (waiting 2 seconds)..."
+sleep 2
+systemctl status ${SERVICE_NAME}.service --no-pager
