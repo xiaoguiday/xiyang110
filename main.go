@@ -31,8 +31,6 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ... 所有基础模块 (RingBuffer, Config, Metrics, pipeTraffic等) 保持不变 ....
-// ... (代码与上一版完全相同，此处省略以保持简洁) ...
 const logBufferSize = 200
 
 type RingBuffer struct {
@@ -103,7 +101,7 @@ type DeviceInfo struct {
 	UsedBytes   int64  `json:"used_bytes"`
 	SecWSKey    string `json:"sec_ws_key"`
 	MaxSessions int    `json:"max_sessions"`
-	Enabled     bool   `json:"enabled"` // <-- NEW FIELD
+	Enabled     bool   `json:"enabled"`
 }
 
 type Config struct {
@@ -144,30 +142,49 @@ func (c *Config) load() error {
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 
-	if err := json.Unmarshal(data, c); err != nil {
-		return fmt.Errorf("could not decode config file: %w. Please check its format", err)
+	// --- MIGRATION LOGIC (REWRITTEN) ---
+	var rawConfig map[string]interface{}
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
+		return fmt.Errorf("could not decode raw config for migration check: %w", err)
 	}
 
-	// --- MIGRATION LOGIC ---
-	// Ensure all devices have the 'Enabled' field.
 	changed := false
-	for id, info := range c.DeviceIDs {
-		// This is a trick: in Go, a new boolean field in an existing struct will be initialized to its zero value, which is `false`.
-		// We can't easily tell if it was `false` in the JSON or missing.
-		// A better way is to unmarshal into a map[string]interface{} first, but for simplicity,
-		// we will assume that if we add this logic, any device re-saved will have it.
-		// A simple migration for new versions is to set it to true if it doesn't exist.
-		// We'll handle this by modifying how we add devices and by adding an API to set status.
-		// For loading, let's assume if it's not present it should be considered enabled for backward compatibility.
-		// This part is tricky. Let's ensure it's set on save and add.
+	if rawDeviceIDs, ok := rawConfig["device_ids"].(map[string]interface{}); ok {
+		for _, rawInfo := range rawDeviceIDs {
+			if infoMap, ok := rawInfo.(map[string]interface{}); ok {
+				if _, hasEnabled := infoMap["enabled"]; !hasEnabled {
+					infoMap["enabled"] = true
+					changed = true
+				}
+			}
+		}
 	}
+
+	finalData := data
 	if changed {
-		Print("[*] Migrated config file to include 'enabled' status for all devices.")
-		return c.save()
+		Print("[*] Migrating config: setting 'enabled: true' for devices missing this field.")
+		migratedData, err := json.Marshal(rawConfig)
+		if err != nil {
+			return fmt.Errorf("failed to marshal migrated config: %w", err)
+		}
+		finalData = migratedData
+	}
+
+	// Unmarshal the final (potentially migrated) data into the struct
+	if err := json.Unmarshal(finalData, c); err != nil {
+		return fmt.Errorf("could not decode final config file: %w", err)
+	}
+	
+	// If we changed it, save it back to the file in a pretty format
+	if changed {
+		 if err := c.save(); err != nil {
+			  Print("[!] Warning: failed to save migrated config file: %v", err)
+		 }
 	}
 
 	return nil
 }
+
 
 func (c *Config) save() error {
 	data, err := json.MarshalIndent(c, "", "  ")
@@ -812,32 +829,7 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.WriteHeader(code)
 	_, _ = w.Write(response)
 }
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
 
-type APIConnectionResponse struct {
-	DeviceID     string `json:"device_id"`
-	Status       string `json:"status"`
-	SentStr      string `json:"sent_str"`
-	RcvdStr      string `json:"rcvd_str"`
-	SpeedStr     string `json:"speed_str"`
-	RemainingStr string `json:"remaining_str"`
-	Expiry       string `json:"expiry"`
-	IP           string `json:"ip"`
-	FirstConn    string `json:"first_conn"`
-	LastActive   string `json:"last_active"`
-	ConnKey      string `json:"conn_key"`
-}
 
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
@@ -1096,9 +1088,6 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		var newSettings Settings
 		settingsBytes, _ := json.Marshal(reqData)
 		_ = json.Unmarshal(settingsBytes, &newSettings)
-
-		// This part remains tricky because JSON unmarshal won't distinguish between an empty list and a field not present.
-		// The frontend will always send the field, so this should be okay.
 		
 		cfg.lock.Lock()
 		cfg.Settings = newSettings
