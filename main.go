@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+//2025-10-14-16-12更新
 const logBufferSize = 200
 
 type RingBuffer struct {
@@ -828,6 +828,35 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(response)
+}
+
+// RE-ADDED: formatBytes function definition
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// RE-ADDED: APIConnectionResponse struct definition
+type APIConnectionResponse struct {
+	DeviceID     string `json:"device_id"`
+	Status       string `json:"status"`
+	SentStr      string `json:"sent_str"`
+	RcvdStr      string `json:"rcvd_str"`
+	SpeedStr     string `json:"speed_str"`
+	RemainingStr string `json:"remaining_str"`
+	Expiry       string `json:"expiry"`
+	IP           string `json:"ip"`
+	FirstConn    string `json:"first_conn"`
+	LastActive   string `json:"last_active"`
+	ConnKey      string `json:"conn_key"`
 }
 
 
