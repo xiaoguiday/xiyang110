@@ -1004,4 +1004,272 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		did, _ := reqData["device_id"].(string)
 		exp, _ := reqData["expiry"].(string)
 		limitStr, _ := reqData["limit_gb"].(string)
-		secWSKey, _ := reqData["
+		secWSKey, _ := reqData["sec_ws_key"].(string)
+		maxSessionsRaw, hasMaxSessions := reqData["max_sessions"]
+		if did == "" || exp == "" || secWSKey == "" {
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "ID, 有效期, 和 Sec-WebSocket-Key 不能为空"})
+			return
+		}
+		limit, _ := strconv.Atoi(limitStr)
+		ms := 1
+		if hasMaxSessions {
+			switch v := maxSessionsRaw.(type) {
+			case float64:
+				ms = int(v)
+			case string:
+				ms, _ = strconv.Atoi(v)
+			}
+			if ms < 0 {
+				ms = 1 // Or some other default/error handling
+			}
+		}
+		cfg.lock.Lock()
+		currentUsage := int64(0)
+		if oldInfo, ok := cfg.DeviceIDs[did]; ok {
+			currentUsage = oldInfo.UsedBytes
+		}
+		// NEW: New devices are enabled by default.
+		cfg.DeviceIDs[did] = DeviceInfo{Expiry: exp, LimitGB: limit, UsedBytes: currentUsage, SecWSKey: secWSKey, MaxSessions: ms, Enabled: true}
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
+		}
+	// NEW API ENDPOINT
+	case "/device/set_status":
+		did, ok1 := reqData["device_id"].(string)
+		enabled, ok2 := reqData["enabled"].(bool)
+		if !ok1 || !ok2 {
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求，需要 device_id 和 enabled 状态"})
+			return
+		}
+		cfg.lock.Lock()
+		if info, ok := cfg.DeviceIDs[did]; ok {
+			info.Enabled = enabled
+			cfg.DeviceIDs[did] = info
+			cfg.lock.Unlock()
+			if err := cfg.SafeSave(); err != nil {
+				sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()})
+			} else {
+				statusText := "启用"
+				if !enabled {
+					statusText = "禁用"
+				}
+				sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", did, statusText)})
+			}
+		} else {
+			cfg.lock.Unlock()
+			sendJSON(w, http.StatusNotFound, map[string]string{"status": "error", "message": "设备未找到"})
+		}
+
+	case "/device/delete":
+		did, _ := reqData["device_id"].(string)
+		cfg.lock.Lock()
+		delete(cfg.DeviceIDs, did)
+		cfg.lock.Unlock()
+		deviceUsage.Delete(did)
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"})
+		}
+	case "/device/reset_traffic":
+		did, _ := reqData["device_id"].(string)
+		if val, ok := deviceUsage.Load(did); ok {
+			atomic.StoreInt64(val.(*int64), 0)
+		}
+		cfg.lock.Lock()
+		if info, ok := cfg.DeviceIDs[did]; ok {
+			info.UsedBytes = 0
+			cfg.DeviceIDs[did] = info
+		}
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"})
+		}
+	case "/account/update":
+		ou, _ := reqData["old_user"].(string)
+		op, _ := reqData["old_pass"].(string)
+		nu, _ := reqData["new_user"].(string)
+		np, _ := reqData["new_pass"].(string)
+		cfg.lock.RLock()
+		storedPass, ok := cfg.Accounts[ou]
+		cfg.lock.RUnlock()
+		if !ok {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"})
+			return
+		}
+		valid := false
+		if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") {
+			valid = checkPasswordHash(op, storedPass)
+		} else {
+			valid = (op == storedPass)
+		}
+		if !valid {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原密码错误"})
+			return
+		}
+		h, err := hashPassword(np)
+		if err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "密码加密失败"})
+			return
+		}
+		cfg.lock.Lock()
+		if ou != nu {
+			delete(cfg.Accounts, ou)
+		}
+		cfg.Accounts[nu] = h
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
+		}
+	case "/settings/save":
+		oldSettings := cfg.GetSettings()
+		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
+		var newSettings Settings
+		settingsBytes, _ := json.Marshal(reqData)
+		_ = json.Unmarshal(settingsBytes, &newSettings)
+		
+		cfg.lock.Lock()
+		cfg.Settings = newSettings
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
+			return
+		}
+		newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}
+		portsChanged := false
+		for i := range oldPorts {
+			if oldPorts[i] != newPorts[i] {
+				portsChanged = true
+				break
+			}
+		}
+		if portsChanged {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
+			go func() {
+				time.Sleep(1 * time.Second)
+				Print("[*] Port settings changed. Restarting server...")
+				executable, _ := os.Executable()
+				cmd := exec.Command(executable, os.Args[1:]...)
+				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+				if err := cmd.Start(); err != nil {
+					Print("[!] FATAL: Failed to restart process: %v", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}()
+		} else {
+			Print("[*] Settings updated and hot-reloaded successfully.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
+		}
+	}
+}
+
+func main() {
+	go func() {
+		log.Println("Starting pprof server on http://localhost:6060/debug/pprof")
+		if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+			Print("[!] PPROF: Failed to start pprof server: %v", err)
+		}
+	}()
+	log.SetOutput(ioutil.Discard)
+	var err error
+	adminPanelHTML, err = ioutil.ReadFile("admin.html")
+	if err != nil {
+		Print("[!] FATAL: admin.html not found: %v", err)
+		os.Exit(1)
+	}
+	loginPanelHTML, err = ioutil.ReadFile("login.html")
+	if err != nil {
+		Print("[!] FATAL: login.html not found: %v", err)
+		os.Exit(1)
+	}
+	Print("[*] WSTunnel-Go starting...")
+	cfg := GetConfig()
+	InitMetrics()
+	settings := cfg.GetSettings()
+	runPeriodicTasks()
+
+	go func() {
+		addr := fmt.Sprintf("0.0.0.0:%d", settings.HTTPPort)
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			Print("[!] FATAL: Failed to listen on %s: %v", addr, err)
+			os.Exit(1)
+		}
+		Print("[*] WS on %s", addr)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				Print("[!] WS accept error: %v", err)
+				continue
+			}
+			go handleClient(conn, false)
+		}
+	}()
+	if _, err := os.Stat(settings.CertFile); err == nil {
+		if _, err := os.Stat(settings.KeyFile); err == nil {
+			go func() {
+				addr := fmt.Sprintf("0.0.0.0:%d", settings.TLSPort)
+				cert, err := tls.LoadX509KeyPair(settings.CertFile, settings.KeyFile)
+				if err != nil {
+					Print("[!] Cert warning: %v. WSS server will not start.", err)
+					return
+				}
+				ln, err := tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}})
+				if err != nil {
+					Print("[!] FATAL: Failed to listen on %s (TLS): %v", addr, err)
+					return
+				}
+				Print("[*] WSS on %s", addr)
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						Print("[!] WSS accept error: %v", err)
+						continue
+					}
+					go handleClient(conn, true)
+				}
+			}()
+		}
+	} else {
+		Print("[!] Cert/Key file not found. WSS server will not start.")
+	}
+
+	adminMux := http.NewServeMux()
+	adminRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user, ok := r.Context().Value("user").(string)
+		if !ok {
+			user = "unknown"
+		}
+		html := string(adminPanelHTML)
+		meta_tag := fmt.Sprintf(`<meta name="user-context" content="%s">`, user)
+		finalHTML := strings.Replace(html, "<head>", "<head>\n    "+meta_tag, 1)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(finalHTML))
+	})
+	adminMux.Handle("/", authMiddleware(adminRootHandler))
+	adminMux.HandleFunc("/login", loginHandler)
+	adminMux.HandleFunc("/logout", logoutHandler)
+
+	// 将所有API端点也保护起来
+	apiHandler := http.HandlerFunc(handleAPI)
+	adminPostHandler := http.HandlerFunc(handleAdminPost)
+	adminMux.Handle("/api/", authMiddleware(apiHandler))
+	adminMux.Handle("/device/", authMiddleware(adminPostHandler))
+	adminMux.Handle("/account/", authMiddleware(adminPostHandler))
+	adminMux.Handle("/settings/", authMiddleware(adminPostHandler))
+
+	adminAddr := fmt.Sprintf("0.0.0.0:%d", settings.StatusPort)
+	Print("[*] Status on http://127.0.0.1:%d", settings.StatusPort)
+	if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
+		Print("[!] FATAL: Failed to start admin server on %s: %v", err)
+		os.Exit(1)
+	}
+}
