@@ -295,7 +295,6 @@ func auditActiveConnections() {
     cfg := GetConfig()
     settings := cfg.GetSettings()
 
-    // If device ID auth is off, only patrol for IP blacklist violations.
     if !settings.EnableDeviceIDAuth {
         activeConns.Range(func(key, value interface{}) bool {
             connInfo := value.(*ActiveConnInfo)
@@ -305,10 +304,9 @@ func auditActiveConnections() {
             }
             return true
         })
-        return // Exit the audit early
+        return
     }
 
-    // --- Full audit logic when Device ID auth is ON ---
     devices := cfg.GetDeviceIDs()
     sessionsByDeviceID := make(map[string][]*ActiveConnInfo)
 
@@ -547,7 +545,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			Print("[*] Received WebSocket handshake from %s for device '%s'.", remoteIP, finalDeviceID)
 			if settings.EnableDeviceIDAuth && found {
-				// FIX: Use effectiveMaxSessions
 				effectiveMaxSessions := deviceInfo.MaxSessions
 				if !settings.AllowSimultaneousConnections {
 					effectiveMaxSessions = 1
@@ -883,6 +880,35 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	_, _ = w.Write(response)
 }
 
+// RE-ADDED: formatBytes function definition
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// RE-ADDED: APIConnectionResponse struct definition
+type APIConnectionResponse struct {
+	DeviceID     string `json:"device_id"`
+	Status       string `json:"status"`
+	SentStr      string `json:"sent_str"`
+	RcvdStr      string `json:"rcvd_str"`
+	SpeedStr     string `json:"speed_str"`
+	RemainingStr string `json:"remaining_str"`
+	Expiry       string `json:"expiry"`
+	IP           string `json:"ip"`
+	FirstConn    string `json:"first_conn"`
+	LastActive   string `json:"last_active"`
+	ConnKey      string `json:"conn_key"`
+}
+
 
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
@@ -1026,7 +1052,6 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			case string:
 				ms, _ = strconv.Atoi(v)
 			}
-			// FIX: Ensure MaxSessions is at least 1
 			if ms < 1 {
 				ms = 1
 			}
