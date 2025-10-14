@@ -1,0 +1,87 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <!-- [响应式 1] 添加 viewport meta 标签 -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSTunnel 登陆</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background-color: #f4f7fb; padding: 15px; box-sizing: border-box; }
+        .login-card { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); width: 320px; text-align: center; }
+        h2 { margin-top: 0; color: #333; }
+        .form-group { margin-bottom: 20px; text-align: left; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; color: #555; }
+        input[type="text"], input[type="password"] { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; font-size: 16px; }
+        button { width: 100%; padding: 12px; background-color: #2563eb; color: white; border: none; border-radius: 4px; font-size: 16px; font-weight: 700; cursor: pointer; transition: background-color 0.2s; }
+        button:hover { background-color: #1d4ed8; }
+        .error-message { color: #dc2626; margin-top: 15px; height: 20px; }
+
+        /* --- [响应式 2] 添加媒体查询 --- */
+        @media (max-width: 480px) {
+            .login-card {
+                width: 100%; /* 在小屏幕上，让卡片宽度占满 */
+                padding: 30px 25px; /* 稍微减小内边距 */
+                border: none;
+                box-shadow: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h2>WSTunnel管理系统</h2>
+        <div class="form-group">
+            <label for="username">管理员账号</label>
+            <input type="text" id="username" required>
+        </div>
+        <div class="form-group">
+            <label for="password">管理员密码</label>
+            <input type="password" id="password" required>
+        </div>
+        <button onclick="login()">登陆</button>
+        <p id="error-message" class="error-message"></p>
+    </div>
+    <script>
+        const gid = id => document.getElementById(id);
+        const usernameInput = gid('username');
+        const passwordInput = gid('password');
+        const errorMessage = gid('error-message');
+
+        async function login() {
+            const user = usernameInput.value.trim();
+            const pass = passwordInput.value.trim();
+
+            if (!user || !pass) {
+                errorMessage.textContent = '用户名和密码不能为空';
+                return;
+            }
+            
+            errorMessage.textContent = '正在登录...';
+
+            try {
+                const response = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: user, password: pass })
+                });
+
+                if (response.ok) {
+                    window.location.href = '/'; // 登录成功，跳转到主页
+                } else {
+                    const errorData = await response.json();
+                    errorMessage.textContent = errorData.message || '登录失败';
+                }
+            } catch (error) {
+                errorMessage.textContent = '请求失败，请检查网络连接。';
+            }
+        }
+        
+        // 允许按回车键登录
+        passwordInput.addEventListener('keyup', function(event) {
+            if (event.key === "Enter") {
+                login();
+            }
+        });
+    </script>
+</body>
+</html>
