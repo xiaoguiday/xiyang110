@@ -209,7 +209,6 @@ func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
 	defer c.lock.RUnlock()
 	devices := make(map[string]DeviceInfo)
 	for k, v := range c.DeviceIDs {
-		// FIX: Ensure MaxSessions is at least 1 when read.
 		if v.MaxSessions < 1 {
 			v.MaxSessions = 1
 		}
@@ -295,14 +294,27 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 func auditActiveConnections() {
     cfg := GetConfig()
     settings := cfg.GetSettings()
+
+    // If device ID auth is off, only patrol for IP blacklist violations.
+    if !settings.EnableDeviceIDAuth {
+        activeConns.Range(func(key, value interface{}) bool {
+            connInfo := value.(*ActiveConnInfo)
+            if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
+                Print("[-] Kicking active connection from blacklisted IP %s (Device: %s)", connInfo.IP, connInfo.DeviceID)
+                connInfo.Writer.Close()
+            }
+            return true
+        })
+        return // Exit the audit early
+    }
+
+    // --- Full audit logic when Device ID auth is ON ---
     devices := cfg.GetDeviceIDs()
     sessionsByDeviceID := make(map[string][]*ActiveConnInfo)
 
-    // First pass: Audit individual connections and group them by Device ID
     activeConns.Range(func(key, value interface{}) bool {
         connInfo := value.(*ActiveConnInfo)
         
-        // Audit 1: IP Blacklist
         if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
             Print("[-] Kicking active connection from blacklisted IP %s (Device: %s)", connInfo.IP, connInfo.DeviceID)
             connInfo.Writer.Close()
@@ -311,14 +323,12 @@ func auditActiveConnections() {
 
         if connInfo.DeviceID != "" && connInfo.DeviceID != connInfo.IP {
             if devInfo, ok := devices[connInfo.DeviceID]; ok {
-                // Audit 2: Device Disabled
                 if !devInfo.Enabled {
                     Print("[-] Kicking active connection from disabled device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
                     connInfo.Writer.Close()
                     return true
                 }
 
-                // Audit 3: Device Expired
                 expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
                 if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
                     Print("[-] Kicking active connection from expired device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
@@ -326,7 +336,6 @@ func auditActiveConnections() {
                     return true
                 }
 
-                // Audit 4: Traffic Limit Exceeded
                 if devInfo.LimitGB > 0 {
                     if usageVal, usageOk := deviceUsage.Load(connInfo.DeviceID); usageOk {
                         currentUsage := atomic.LoadInt64(usageVal.(*int64))
@@ -338,14 +347,12 @@ func auditActiveConnections() {
                     }
                 }
                 
-                // If the connection is valid, add it to the map for session limit check
                 sessionsByDeviceID[connInfo.DeviceID] = append(sessionsByDeviceID[connInfo.DeviceID], connInfo)
             }
         }
         return true
     })
 
-    // Second pass: Check for session limit violations for each device ID
     for deviceID, sessions := range sessionsByDeviceID {
         if devInfo, ok := devices[deviceID]; ok {
             effectiveMaxSessions := devInfo.MaxSessions
@@ -354,15 +361,13 @@ func auditActiveConnections() {
             }
 
             if len(sessions) > effectiveMaxSessions {
-                // Sort sessions by connection time, oldest first
                 sort.Slice(sessions, func(i, j int) bool {
                     return sessions[i].FirstConnection.Before(sessions[j].FirstConnection)
                 })
 
-                // Kick the oldest sessions that exceed the limit
                 sessionsToKick := len(sessions) - effectiveMaxSessions
                 for i := 0; i < sessionsToKick; i++ {
-                    Print("[-] Kicking oldest session for device %s to enforce session limit (%d/%d)", deviceID, len(sessions)-i-1, effectiveMaxSessions)
+                    Print("[-] Kicking oldest session for device %s to enforce session limit (%d/%d)", deviceID, len(sessions)-i, effectiveMaxSessions)
                     sessions[i].Writer.Close()
                 }
             }
@@ -542,6 +547,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			Print("[*] Received WebSocket handshake from %s for device '%s'.", remoteIP, finalDeviceID)
 			if settings.EnableDeviceIDAuth && found {
+				// FIX: Use effectiveMaxSessions
 				effectiveMaxSessions := deviceInfo.MaxSessions
 				if !settings.AllowSimultaneousConnections {
 					effectiveMaxSessions = 1
@@ -875,33 +881,6 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(response)
-}
-
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-type APIConnectionResponse struct {
-	DeviceID     string `json:"device_id"`
-	Status       string `json:"status"`
-	SentStr      string `json:"sent_str"`
-	RcvdStr      string `json:"rcvd_str"`
-	SpeedStr     string `json:"speed_str"`
-	RemainingStr string `json:"remaining_str"`
-	Expiry       string `json:"expiry"`
-	IP           string `json:"ip"`
-	FirstConn    string `json:"first_conn"`
-	LastActive   string `json:"last_active"`
-	ConnKey      string `json:"conn_key"`
 }
 
 
