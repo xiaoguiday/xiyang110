@@ -1,0 +1,389 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSTunnel Admin</title>
+    <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif,"Apple Color Emoji","Segoe UI Emoji","Segoe UI Symbol";background:#f4f7fb;margin:0;font-size:15px}
+        .container{max-width:1400px;margin:0 auto;padding:0 18px}
+        .card{background:white;border-radius:8px;padding:18px;box-shadow:0 4px 14px rgba(20,30,60,0.06)}
+        .page-grid > .card, .right-panel-wrapper > .card { margin-top: 12px; }
+        table{width:100%;border-collapse:collapse;font-size:14px;}
+        th,td{padding:10px 12px;border-bottom:1px solid #f1f5f9;word-wrap:break-word; text-align: center; vertical-align: middle;}
+        #device-list td { white-space: nowrap; }
+        th{white-space:nowrap}thead th{position:sticky;top:0;background:#f8fafc;border-bottom:2px solid #eef2f7;font-weight:700}
+        tr:last-child td {border-bottom: none;}
+        td:first-child, th:first-child { text-align: left; }
+        td:nth-child(2) { text-align: left; }
+        td:last-child, th:last-child { text-align: center; }
+        .table-container,.device-list-container{overflow-x:auto;border-radius:8px;border:1px solid #e6eef8;margin-top:8px}.table-container{max-height:calc(100vh - 400px)}.device-list-container{flex-grow: 1;}.btn{border:0;padding:8px 12px;border-radius:6px;cursor:pointer;font-weight:700;color:white;transition:opacity .2s}.btn:hover{opacity:0.85}.btn-sm{padding:5px 8px; font-size:12px;}.btn.primary{background:#2563eb}.btn.secondary{background:#10b981}.btn.danger{background:#dc2626}.btn.info{background:#0ea5e9}.btn.warning{background:#f59e0b}.status-pill{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:600;font-size:12px}
+        .status-normal, .status-活跃 {background:#e6ffed;color:#065f46}
+        .status-banned {background:#fecaca;color:#991b1b}
+        .status-expired {background:#feecdc;color:#9a3412}
+        .status-握手 {background:#fffbeb;color:#b45309}
+        .navbar{display:flex;gap:8px;align-items:center;padding:8px 0;flex-wrap:wrap;border-bottom: 1px solid #e2e8f0;}.navbar a{padding:8px 12px;border-radius:8px;text-decoration:none;font-weight:700;color:#0f172a;transition:background-color .2s, color .2s}.navbar a.active{background:#eef2ff; color:#2563eb;}.navbar a:not(.active):hover{background-color:#f8fafc;}.form-row{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}.form-row label{font-weight:600}
+        input[type="text"],input[type="password"],input[type="number"],select,textarea{font-size:14px;padding:8px;border:1px solid #e2e8f0;border-radius:6px;box-sizing:border-box}
+        input[type="text"],input[type="password"],input[type="number"],select{height:32px; padding: 4px 8px;}
+        textarea { width: 100%; resize: vertical; }
+        .status-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:12px 0}.status-card{background:#fff;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(20,30,60,0.05);border:1px solid #eef2f7;display:flex;flex-direction:column;gap:4px}.status-card span{font-size:14px;color:#64748b}.status-card strong{font-size:16px;color:#0f172a;font-weight:600}.status-card small{font-size:12px;color:#94a3b8}.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px;margin-top:12px}.settings-group{border:1px solid #eef2f7;border-radius:8px;padding:12px 16px}.settings-group h3{margin-top:0;font-size:16px;border-bottom:1px solid #eef2f7;padding-bottom:10px;margin-bottom:16px}.settings-group .form-row{margin-top:12px}.settings-group .form-row label{min-width:140px;text-align:right;font-weight:normal;color:#334155}.settings-group .form-row input[type=text]{flex-grow:1; width: auto; max-width: none; }.settings-group .form-row.full-width input{width:100%;}
+        .toggle-switch{position:relative;display:inline-block;width:50px;height:28px}.toggle-switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.4s;border-radius:28px}.slider:before{position:absolute;content:"";height:20px;width:20px;left:4px;bottom:4px;background-color:white;transition:.4s;border-radius:50%}input:checked+.slider{background-color:#2563eb}input:checked+.slider:before{transform:translateX(22px)}
+        .page-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(450px, 1fr); gap: 12px; align-items: stretch; }
+        .page-grid > .card { display: flex; flex-direction: column; height: calc(100vh - 200px); min-width: 0; }
+        .form-panel .form-row { flex-wrap: nowrap; }.form-panel .form-row label { flex-basis: 120px; flex-shrink: 0; text-align: right; font-weight: normal; color: #334155; line-height: 32px; }.form-panel .form-row input, .form-panel .form-row select { flex-grow: 1; }
+        .action-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; }
+        #device-list tbody tr { cursor: pointer; transition: background-color .2s; }.device-list tbody tr:hover { background-color: #f8fafc; }.device-list tbody tr.highlight { background-color: #eef2ff !important; }
+        #toast-container { position: fixed; top: 20px; right: 20px; z-index: 9999; display: flex; flex-direction: column; gap: 10px; }
+        .toast { padding: 12px 18px; border-radius: 6px; color: white; font-weight: 600; box-shadow: 0 4px 12px rgba(0,0,0,0.15); opacity: 0; transform: translateX(100%); transition: all 0.4s ease-in-out; }.toast.show { opacity: 1; transform: translateX(0); }.toast.success { background-color: #10b981; }.toast.error { background-color: #dc2626; }.toast.info { background-color: #0ea5e9; } .toast.warning { background-color: #f59e0b; }
+        .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 10000; display: flex; justify-content: center; align-items: center; opacity: 0; visibility: hidden; transition: all 0.3s; }.modal-overlay.show { opacity: 1; visibility: visible; }
+        .modal-content { background: white; padding: 25px; border-radius: 8px; max-width: 400px; width: 90%; text-align: center; transform: scale(0.9); transition: all 0.3s; }.modal-overlay.show .modal-content { transform: scale(1); }
+        .modal-buttons { display: flex; justify-content: center; gap: 15px; margin-top: 20px; }
+        .right-panel-wrapper { display: flex; flex-direction: column; }
+        .right-panel-wrapper .card { margin-top: 0; }
+        .page-grid > .card, .right-panel-wrapper { height: calc(100vh - 200px); }
+        .right-panel-wrapper .card:last-child { margin-top: 12px; flex-grow: 1; display: flex; flex-direction: column; }
+        .right-panel-wrapper .card:last-child .device-list-container { flex-grow: 1; }
+        .hidden-span { visibility: hidden; position: absolute; }
+        
+        @media (max-width: 1024px) {
+            .page-grid { grid-template-columns: 1fr; } 
+            .page-grid > .card, .right-panel-wrapper { height: auto; }
+            .device-list-container, .table-container { max-height: 400px; }
+            .form-panel .form-row { flex-wrap: wrap; }
+            .form-panel .form-row label { text-align: left; flex-basis: 100%; }
+            .action-buttons { padding-left: 0; justify-content: flex-start; }
+            .navbar { justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+<div id="toast-container"></div>
+<div id="modal-container"></div>
+<div class="container">
+    <nav class="navbar">
+        <a href="#/status">连接状态</a>
+        <a href="#/device">设备管理</a>
+        <a href="#/account">账号设置</a>
+        <a href="#/settings">系统设置</a>
+        <a href="#/logs">系统日志</a>
+        <a style="margin-left:auto;background:#ff6b6b;color:#fff;border-radius:6px;padding:8px 12px;text-decoration:none" href="#" onclick="logout()">退出</a>
+    </nav>
+    <div class="status-bar">
+        <div class="status-card"><span>登录用户</span><strong id="current-user">...</strong></div>
+        <div class="status-card"><span>活跃连接</span><strong id="active-connections">...</strong></div>
+        <div class="status-card"><span>总上传</span><strong id="global-sent">...</strong></div>
+        <div class="status-card"><span>总下载</span><strong id="global-received">...</strong></div>
+        <div class="status-card"><span>运行时长</span><strong id="server-uptime">...</strong></div>
+        <div class="status-card"><span>CPU <small>(核心)</small></span><strong><span id="cpu-usage">...</span> (<span id="cpu-cores">...</span>)</strong></div>
+        <div class="status-card"><span>内存使用</span><strong id="mem-usage">...</strong></div>
+    </div>
+    <main id="content-area"></main>
+</div>
+
+<script>
+    const gid = id => document.getElementById(id); const contentArea = gid('content-area');
+    let appState = { devices: {}, usage: {}, settings: null, connections: [], logs: [], currentUser: '' };
+    let refreshInterval;
+
+    function showToast(message, type = 'info', duration = 3000) { /* ... NO CHANGE ... */ }
+    function showConfirm(title, message, onConfirm) { /* ... NO CHANGE ... */ }
+    async function apiRequest(url, options = {}) { /* ... NO CHANGE ... */ }
+    const get = (url) => apiRequest(url);
+    const post = (url, data) => apiRequest(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    function formatBytesJS(b, d = 2) { /* ... NO CHANGE ... */ }
+    
+    // Connections table is unchanged as it receives friendly name from backend
+    function renderConnectionsTable() { /* ... NO CHANGE ... */ }
+    function renderStatusPage() { /* ... NO CHANGE ... */ }
+    
+    // *** CHANGED: renderDevicePage is updated for the new data model ***
+    function renderDevicePage() {
+        if (!appState.settings) { contentArea.innerHTML = `<div class="card">正在加载初始数据...</div>`; return; }
+        contentArea.innerHTML = `
+        <div class="page-grid">
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3 style="margin:0;">设备列表</h3>
+                    <input id="search_input_device" type="text" placeholder="模糊搜索设备..." onkeyup="filterDevicesTable()" style="width: 200px;">
+                </div>
+                <div class="device-list-container">
+                    <table id="device-list">
+                        <thead><tr><th style="width: 80px;">状态</th><th style="width: 120px;">名称</th><th style="width:120px;">设备密钥</th><th style="width: 110px;">有效期</th><th style="width: 120px;">已用/总量</th><th style="width: 80px;">连接数</th><th style="width: 70px;">操作</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="right-panel-wrapper">
+                <div class="card form-panel">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                        <h3 style="margin:0;">编辑/创建账号</h3>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <label class="toggle-switch"><input type="checkbox" id="device-auth-toggle" ${appState.settings.enable_device_id_auth ? 'checked' : ''} onchange="toggleDeviceAuth()"><span class="slider"></span></label>
+                            <span id="device-auth-status-text">${appState.settings.enable_device_id_auth ? "认证开启" : "已关闭"}</span>
+                        </div>
+                    </div>
+                    <!-- HIDDEN FIELD to store the real key of the currently edited device -->
+                    <input type="hidden" id="current_editing_key">
+                    <div class="form-row"><label>设备名称:</label><input id="device_name" type="text" placeholder="必填, e.g., user01"></div>
+                    <div class="form-row"><label>设备密钥:</label><input id="sec_ws_key" type="text" placeholder="必填, 点击一键填充生成"></div>
+                    <div class="form-row"><label>有效期:</label><input id="expiry" type="text" placeholder="YYYY-MM-DD, 必填"></div>
+                    <div class="form-row"><label>流量 (GB):</label><input id="limit_gb" type="text" placeholder="0为无限"></div>
+                    <div class="form-row"><label>最大连接数:</label><input id="max_sessions" type="number" value="1" style="flex-grow: 0; width: 80px;"></div>
+                    
+                    <div class="action-buttons" style="padding-left: 0; margin-top: 20px; justify-content: center;">
+                        <button class="btn info" onclick="generateNewDevice()">一键填充</button>
+                        <button class="btn secondary" onclick="resetTraffic()">重置流量</button>
+                        <button class="btn primary" onclick="addID()">保存设置</button>
+                    </div>
+                    <div class="action-buttons" style="padding-left: 0; margin-top: 10px; justify-content: flex-end;">
+                        <div id="ban-unban-button-container"></div>
+                    </div>
+                </div>
+                <div class="card">
+                    <h3 style="margin-top:0;">封禁列表</h3>
+                    <div class="device-list-container" style="max-height: 300px;">
+                        <table id="blacklist-table">
+                            <thead><tr><th style="text-align:left;">名称</th><th>操作</th></tr></thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+        renderDevicesTable();
+        renderBlacklistTable();
+    }
+
+    // *** CHANGED: renderDevicesTable is updated for the new data model ***
+    function renderDevicesTable() {
+        const tbody = gid('device-list')?.querySelector('tbody');
+        if (!tbody) return;
+        let tableRowsHtml = '';
+        // The key is now sec_ws_key, info contains friendly_name
+        Object.entries(appState.devices).sort((a, b) => a[1].friendly_name.localeCompare(b[1].friendly_name)).forEach(([key, info]) => {
+            const name = info.friendly_name;
+            const limit = info.limit_gb > 0 ? `${info.limit_gb} GB` : '无限';
+            // Usage is now tracked by key (sec_ws_key)
+            const used = appState.usage[key] || 0;
+            const isBanned = !info.enabled;
+            const isExpired = new Date(info.expiry) < new Date();
+            let status = 'normal'; let statusText = '正常';
+            if (isBanned) { status = 'banned'; statusText = '禁止'; }
+            else if (isExpired) { status = 'expired'; statusText = '过期'; }
+            
+            // IMPORTANT: id and onclick now use 'key' (sec_ws_key)
+            tableRowsHtml += `<tr id="device-row-${key}" onclick="fillDeviceForm('${key}')" data-sec-ws-key="${key}">
+                <td><span class="status-pill status-${status}">${statusText}</span></td>
+                <td style="text-align:left;">${name}</td>
+                <td><button class="btn info btn-sm" onclick="event.stopPropagation(); copyToClipboard('${key}')">复制Key</button></td>
+                <td>${info.expiry}</td>
+                <td class="used-traffic">${formatBytesJS(used)} / ${limit}</td>
+                <td>${(info.max_sessions || 1) == 0 ? "不限制" : (info.max_sessions || 1)}</td>
+                <td><button class="btn danger btn-sm" onclick="event.stopPropagation(); deleteDeviceWithConfirm('${key}')">删除</button></td>
+            </tr>`;
+        });
+        tbody.innerHTML = tableRowsHtml;
+        filterDevicesTable();
+    }
+
+    // *** CHANGED: renderBlacklistTable is updated for the new data model ***
+    function renderBlacklistTable(){
+        const tbody = gid('blacklist-table')?.querySelector('tbody');
+        if(!tbody) return;
+        
+        let h = '';
+        // The key is now sec_ws_key
+        const bannedDevices = Object.entries(appState.devices).filter(([key, info]) => !info.enabled);
+
+        if(bannedDevices.length === 0) { 
+            h = '<tr><td colspan="2" style="text-align:center;">暂无封禁设备</td></tr>'; 
+        } else { 
+            bannedDevices.forEach(([key, info]) => {
+                const name = info.friendly_name;
+                h += `<tr>
+                    <td style="text-align:left;">${name}</td>
+                    <td style="text-align:center;">
+                        <button class="btn secondary btn-sm" onclick="setDeviceStatus('${key}', true)">解除</button>
+                        <button class="btn danger btn-sm" style="margin-left:5px;" onclick="deleteDeviceWithConfirm('${key}')">删除</button>
+                    </td>
+                </tr>`;
+            }); 
+        }
+        tbody.innerHTML = h;
+    }
+
+    function renderAccountPage() { /* ... NO CHANGE ... */ }
+    function renderSettingsPage() { /* ... NO CHANGE ... */ }
+    function renderLogsPage() { /* ... NO CHANGE ... */ }
+    async function updateDynamicData() { /* ... NO CHANGE ... */ }
+    async function toggleDeviceAuth() { /* ... NO CHANGE ... */ }
+    
+    // *** CHANGED: addID is updated for the new API ***
+    async function addID() {
+        const d = {
+            friendly_name: gid("device_name").value.trim(),
+            sec_ws_key: gid("sec_ws_key").value.trim(),
+            expiry: gid("expiry").value.trim(),
+            limit_gb: gid("limit_gb").value.trim() || "0",
+            max_sessions: parseInt(gid("max_sessions").value, 10) || 1
+        };
+
+        if (!d.friendly_name || !d.expiry) return showToast("名称和有效期不能为空", 'error');
+        if (!d.sec_ws_key) return showToast("设备密钥不能为空", 'error');
+
+        // This API call now sends 'friendly_name'
+        const r = await post("/device/add", d);
+        if (r) {
+            showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+            if (r.status === 'ok') {
+                const [devs, usage] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
+                appState.devices = devs || appState.devices;
+                appState.usage = usage || appState.usage;
+                renderDevicesTable();
+                renderBlacklistTable();
+            }
+        }
+    }
+
+    // *** CHANGED: deleteDeviceWithConfirm is updated for the new API ***
+    async function deleteDeviceWithConfirm(key) { // Receives key (sec_ws_key)
+        const name = appState.devices[key]?.friendly_name || '未知设备';
+        showConfirm('确认删除', `您确定要永久删除设备 "${name}" 吗？此操作不可撤销。`, async () => {
+            // Sends sec_ws_key to the backend
+            const r = await post("/device/delete", { sec_ws_key: key });
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === "ok") {
+                    const [devs, usage] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
+                    appState.devices = devs || appState.devices;
+                    appState.usage = usage || appState.usage;
+                    renderDevicesTable();
+                    renderBlacklistTable();
+                }
+            }
+        });
+    }
+    
+    // *** CHANGED: resetTraffic is updated for the new API ***
+    async function resetTraffic() {
+        // Gets key from the hidden input field
+        const key = gid("current_editing_key").value.trim();
+        if (!key) return showToast("请先点击一个设备以填充表单", 'error');
+        const name = appState.devices[key]?.friendly_name || '该设备';
+
+        showConfirm('确认重置流量', `您确定要重置设备 "${name}" 的已用流量吗？`, async () => {
+            // Sends sec_ws_key to the backend
+            const r = await post("/device/reset_traffic", { sec_ws_key: key });
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === 'ok') {
+                    const usage = await get('/api/device_usage');
+                    if (usage) {
+                        appState.usage = usage;
+                        renderDevicesTable();
+                    } else {
+                        showToast('流量已重置，但刷新数据失败', 'warning');
+                    }
+                }
+            }
+        });
+    }
+    
+    // *** CHANGED: fillDeviceForm is updated for the new data model ***
+    function fillDeviceForm(key) { // Receives key (sec_ws_key)
+        const info = appState.devices[key];
+        if (!info) return;
+        gid("device_name").value = info.friendly_name; // 'device_name' is the new input ID
+        gid("sec_ws_key").value = key;
+        gid("current_editing_key").value = key; // Set the hidden key
+        gid("expiry").value = info.expiry;
+        gid("limit_gb").value = info.limit_gb;
+        gid("max_sessions").value = typeof info.max_sessions !== "undefined" ? info.max_sessions : 1;
+        document.querySelectorAll('#device-list tbody tr').forEach(r => r.classList.remove('highlight'));
+        gid(`device-row-${key}`)?.classList.add('highlight');
+        
+        const btnContainer = gid('ban-unban-button-container');
+        if (info.enabled) {
+            btnContainer.innerHTML = `<button class="btn warning" onclick="setDeviceStatusFromForm(false)">封禁账号</button>`;
+        } else {
+            btnContainer.innerHTML = `<button class="btn secondary" onclick="setDeviceStatusFromForm(true)">解除封禁</button>`;
+        }
+    }
+    
+    function generateNewDevice() { /* ... NO CHANGE ... */ }
+    function copyToClipboard(text) { /* ... NO CHANGE ... */ }
+    function filterDevicesTable() { /* ... NO CHANGE ... */ }
+    async function updateAccount() { /* ... NO CHANGE ... */ }
+    function logout(message) { /* ... NO CHANGE ... */ }
+    async function manageSshUser(action) { /* ... NO CHANGE ... */ }
+    async function addIpToBlacklist(ip) { /* ... NO CHANGE ... */ }
+    
+    // *** CHANGED: banUserFromConn now sends key to setDeviceStatus ***
+    function banUserFromConn(connKey, deviceId) { // deviceId here is the friendly_name
+        post("/api/kick", { conn_key: connKey });
+
+        if (deviceId && deviceId.includes('.')) {
+            showToast(`正在将IP ${deviceId} 加入系统黑名单...`, 'info');
+            addIpToBlacklist(deviceId);
+        } else if (deviceId) {
+            // Find the key (sec_ws_key) from the friendly_name
+            let deviceKey = null;
+            for(const [key, info] of Object.entries(appState.devices)) {
+                if (info.friendly_name === deviceId) {
+                    deviceKey = key;
+                    break;
+                }
+            }
+            if(deviceKey) {
+                setDeviceStatus(deviceKey, false);
+            } else {
+                showToast(`无法在设备列表中找到 ${deviceId} 进行封禁`, 'error');
+            }
+        } else {
+            showToast('无法禁止未知设备或IP地址', 'error');
+        }
+    }
+
+    // *** CHANGED: setDeviceStatus is updated for the new API ***
+    async function setDeviceStatus(key, isEnabled) { // Receives key (sec_ws_key)
+        const name = appState.devices[key]?.friendly_name || '该设备';
+        const actionText = isEnabled ? '解封' : '封禁';
+        showConfirm(`确认${actionText}`, `您确定要${actionText}设备 "${name}" 吗？`, async () => {
+            // Sends sec_ws_key to the backend
+            const r = await post("/device/set_status", { sec_ws_key: key, enabled: isEnabled });
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === 'ok') {
+                    const devices = await get('/api/devices');
+                    if(devices) {
+                        appState.devices = devices;
+                        renderDevicesTable();
+                        renderBlacklistTable(); 
+                        if (gid('current_editing_key').value === key) {
+                            fillDeviceForm(key);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    // *** CHANGED: setDeviceStatusFromForm uses the hidden key ***
+    function setDeviceStatusFromForm(isEnabled) {
+        const key = gid('current_editing_key').value.trim();
+        if (!key) return showToast('请先点击一个设备', 'error');
+        setDeviceStatus(key, isEnabled);
+    }
+    
+    function filterConnectionsTable() { /* ... NO CHANGE ... */ }
+    async function saveSettings() { /* ... NO CHANGE ... */ }
+    
+    const routes = { '#/status': renderStatusPage, '#/device': renderDevicePage, '#/account': renderAccountPage, '#/settings': renderSettingsPage, '#/logs': renderLogsPage };
+    function router() { /* ... NO CHANGE ... */ }
+    async function initializeApp() { /* ... NO CHANGE ... */ }
+    
+    window.addEventListener('hashchange', router);
+    document.addEventListener('DOMContentLoaded', initializeApp);
+</script>
+</body>
+</html>
