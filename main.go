@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+// 055
 // I/O缓冲区池
 var bufferPool sync.Pool
 
@@ -53,7 +53,6 @@ type RingBuffer struct {
 	buffer []string
 	head   int
 }
-
 func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{buffer: make([]string, capacity)} }
 func (rb *RingBuffer) Add(msg string) {
 	rb.mu.Lock()
@@ -235,8 +234,6 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 }
 
 // --- 后台周期性任务 ---
-
-// auditActiveConnections (生产版本 - 安静模式)
 func auditActiveConnections() {
 	cfg := GetConfig()
 	activeConns.Range(func(key, value interface{}) bool {
@@ -299,11 +296,8 @@ func auditActiveConnections() {
 		return true
 	})
 }
-
-
 func runPeriodicTasks() {
 	cfg := GetConfig()
-	// 任务1: 同步流量数据到内存Config
 	trafficSyncTicker := time.NewTicker(5 * time.Second)
 	go func() {
 		for range trafficSyncTicker.C {
@@ -320,19 +314,16 @@ func runPeriodicTasks() {
 			cfg.lock.Unlock()
 		}
 	}()
-	// 任务2: 定期将内存Config写入硬盘
 	diskSaveTicker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range diskSaveTicker.C {
 			cfg.SafeSave()
 		}
 	}()
-	// 任务3: 收集服务器状态
 	statusTicker := time.NewTicker(2 * time.Second)
 	go func() {
 		for range statusTicker.C { collectSystemStatus() }
 	}()
-	// 任务4: 执行连接审计
 	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C { auditActiveConnections() }
@@ -354,7 +345,7 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
 
-// Reader/Writer 包装器，实现双端心跳更新
+// Reader/Writer 包装器
 type writeTracker struct {
 	io.Writer
 	connInfo   *ActiveConnInfo
@@ -392,7 +383,7 @@ func (rt *readTracker) Read(p []byte) (n int, err error) {
 	return
 }
 
-// pipeTraffic 使用包装器恢复 io.Copy 的高性能
+// pipeTraffic 使用高性能的 io.Copy 模型
 func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
 	defer cancel()
@@ -420,7 +411,9 @@ func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *Act
 	}
 }
 
-
+// ==============================================================================
+// === 终极修复：重构 handleClient，确保实时读取最新系统设置 ===
+// ==============================================================================
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -430,21 +423,26 @@ func handleClient(conn net.Conn, isTLS bool) {
 	}()
 
 	cfg := GetConfig()
-	cfg.lock.RLock()
-	settings := cfg.Settings
-	cfg.lock.RUnlock()
-
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-	if settings.EnableIPBlacklist && isIPInList(remoteIP, settings.IPBlacklist) {
+
+	// 在连接建立之初，实时读取一次 IP 名单设置
+	cfg.lock.RLock()
+	ipBlacklist := cfg.Settings.IPBlacklist
+	enableIPBlacklist := cfg.Settings.EnableIPBlacklist
+	ipWhitelist := cfg.Settings.IPWhitelist
+	enableIPWhitelist := cfg.Settings.EnableIPWhitelist
+	cfg.lock.RUnlock()
+
+	if enableIPBlacklist && isIPInList(remoteIP, ipBlacklist) {
 		Print("[-] Connection from blacklisted IP %s rejected.", remoteIP)
 		return
 	}
-	if settings.EnableIPWhitelist && !isIPInList(remoteIP, settings.IPWhitelist) {
+	if enableIPWhitelist && !isIPInList(remoteIP, ipWhitelist) {
 		Print("[-] Connection from non-whitelisted IP %s rejected.", remoteIP)
 		return
 	}
@@ -468,7 +466,11 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var credential string
 
 	for !forwardingStarted {
-		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(settings.Timeout) * time.Second))
+		cfg.lock.RLock()
+		handshakeTimeout := cfg.Settings.Timeout
+		cfg.lock.RUnlock()
+		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(handshakeTimeout) * time.Second))
+		
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if err != io.EOF { Print("[-] Handshake read error from %s: %v", remoteIP, err) } else { Print("[-] Client %s closed connection during handshake.", remoteIP) }
@@ -493,8 +495,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 				finalDeviceID = deviceInfo.FriendlyName
 			}
 		}
+		
+		cfg.lock.RLock()
+		enableDeviceIDAuth := cfg.Settings.EnableDeviceIDAuth
+		cfg.lock.RUnlock()
 
-		if settings.EnableDeviceIDAuth {
+		if enableDeviceIDAuth {
 			if !found {
 				Print("[!] Auth Enabled: Invalid Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
 				_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n"))
@@ -534,12 +540,17 @@ func handleClient(conn net.Conn, isTLS bool) {
 		connInfo.Credential = credential
 		
 		ua := req.UserAgent()
-		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
+		cfg.lock.RLock()
+		uaKeywordProbe := cfg.Settings.UAKeywordProbe
+		uaKeywordWS := cfg.Settings.UAKeywordWS
+		cfg.lock.RUnlock()
+
+		if uaKeywordProbe != "" && strings.Contains(ua, uaKeywordProbe) {
 			Print("[*] Received probe from %s for device '%s'. Awaiting WS handshake.", remoteIP, finalDeviceID)
 			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 			continue
 		}
-		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
+		if uaKeywordWS != "" && strings.Contains(ua, uaKeywordWS) {
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
 			connInfo.Status = "活跃"
 			forwardingStarted = true
@@ -551,8 +562,11 @@ func handleClient(conn net.Conn, isTLS bool) {
 	}
 	_ = conn.SetReadDeadline(time.Time{})
 
-	targetHost := settings.DefaultTargetHost
-	targetPort := settings.DefaultTargetPort
+	cfg.lock.RLock()
+	targetHost := cfg.Settings.DefaultTargetHost
+	targetPort := cfg.Settings.DefaultTargetPort
+	cfg.lock.RUnlock()
+
 	if realHost := extractHeaderValue(headersText, "x-real-host"); realHost != "" {
 		if host, portStr, err := net.SplitHostPort(realHost); err == nil {
 			targetHost = host
@@ -585,7 +599,10 @@ func handleClient(conn net.Conn, isTLS bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	idleTimeout := time.Duration(settings.Timeout) * time.Second
+	cfg.lock.RLock()
+	timeoutSetting := cfg.Settings.Timeout
+	cfg.lock.RUnlock()
+	idleTimeout := time.Duration(timeoutSetting) * time.Second
 	if idleTimeout < 90*time.Second {
 		idleTimeout = 90 * time.Second
 	}
@@ -1033,7 +1050,6 @@ func main() {
 	Print("[*] WSTunnel-Go starting...")
 	cfg := GetConfig()
 	
-	// 在获取 settings 后初始化 buffer pool
 	cfg.lock.RLock()
 	settings := cfg.Settings
 	cfg.lock.RUnlock()
