@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-// 2025-10-15-10-42 更新 缓冲区(Bytes)未生效问题
+
 const logBufferSize = 200
 
 // RingBuffer and logging functions
@@ -233,32 +233,56 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
+// *** THIS IS THE CORRECTED FUNCTION ***
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
-	devices := cfg.GetDeviceIDs()
+	devices := cfg.GetDeviceIDs() // map key is sec_ws_key
+
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
+
+		// Check IP blacklist (always active)
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] Kicking active connection from blacklisted IP %s (Device: %s)", connInfo.IP, connInfo.DeviceID)
 			connInfo.Writer.Close()
-			return true
+			return true // Continue to next connection
 		}
-		if !settings.EnableDeviceIDAuth { return true }
+
+		// If auth master switch is off, skip all subsequent device-specific checks
+		if !settings.EnableDeviceIDAuth {
+			return true // Allow connection, continue to next
+		}
+
+		// --- From here, auth is ON ---
+
+		// Check if the connection has a valid credential
 		if connInfo.Credential != "" {
+			// Connection has a credential, now validate it
 			if devInfo, ok := devices[connInfo.Credential]; ok {
+				// Credential found in device list
 				if !devInfo.Enabled {
+					// But device is disabled, kick!
 					Print("[-] Kicking active connection from disabled device %s (IP: %s)", connInfo.DeviceID, connInfo.IP)
 					connInfo.Writer.Close()
 					return true
 				}
 			} else {
+				// Credential NOT found (e.g., device was deleted), kick!
 				Print("[-] Kicking active connection, device %s no longer exists (IP: %s)", connInfo.DeviceID, connInfo.IP)
 				connInfo.Writer.Close()
 				return true
 			}
+		} else {
+			// Connection has NO credential.
+			// This means it connected when auth was off. Now that auth is on, it's an illegal connection. Kick!
+			Print("[-] Kicking unauthenticated connection from %s, device auth is now enabled.", connInfo.IP)
+			connInfo.Writer.Close()
+			return true
 		}
-		return true
+
+		// If all checks passed, the connection is valid
+		return true // Continue to next connection
 	})
 }
 
@@ -472,7 +496,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
-	// *** LATEST CHANGE: Passing buffer size from settings to pipeTraffic ***
 	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true, settings.BufferSize)
 	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false, settings.BufferSize)
 	wg.Wait()
@@ -506,7 +529,6 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	return
 }
 
-// *** LATEST CHANGE: pipeTraffic now accepts and uses bufferSize from settings ***
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool, bufferSize int) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
@@ -520,7 +542,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 
 	if bufferSize <= 0 {
-		bufferSize = 32 * 1024 // Default to 32KB if config is invalid
+		bufferSize = 32 * 1024
 	}
 	buf := make([]byte, bufferSize)
 
@@ -587,7 +609,6 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
-
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
