@@ -31,9 +31,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ==============================================================================
-// === 1. 新增: 引入 sync.Pool 来复用I/O缓冲区, 降低GC压力 ===
-// ==============================================================================
+// I/O缓冲区池，用于复用内存，降低GC压力
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
@@ -49,12 +47,13 @@ func initBufferPool(size int) {
 
 const logBufferSize = 200
 
-// RingBuffer and logging functions (无变化)
+// 环形缓冲区日志记录器
 type RingBuffer struct {
 	mu     sync.RWMutex
 	buffer []string
 	head   int
 }
+
 func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{buffer: make([]string, capacity)} }
 func (rb *RingBuffer) Add(msg string) {
 	rb.mu.Lock()
@@ -74,17 +73,21 @@ func (rb *RingBuffer) GetLogs() []string {
 			logs = append(logs, rb.buffer[idx])
 		}
 	}
+	// 反转日志，使最新的日志在最前面
 	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
 		logs[i], logs[j] = logs[j], logs[i]
 	}
 	return logs
 }
+
 var logBuffer *RingBuffer
+
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
 
-// --- 所有 Struct 定义和配置管理部分 (无变化) ---
+// --- 配置相关的结构体和管理函数 ---
 var ConfigFile = "ws_config.json"
+
 type Settings struct {
 	HTTPPort                     int      `json:"http_port"`
 	TLSPort                      int      `json:"tls_port"`
@@ -92,7 +95,7 @@ type Settings struct {
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	Timeout                      int      `json:"timeout"`
+	Timeout                      int      `json:"timeout"` // 也用作应用层心跳的超时时间
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -120,8 +123,10 @@ type Config struct {
 	DeviceIDs map[string]DeviceInfo `json:"device_ids"`
 	lock      sync.RWMutex
 }
+
 var globalConfig *Config
 var once sync.Once
+
 func GetConfig() *Config {
 	once.Do(func() {
 		globalConfig = &Config{}
@@ -185,9 +190,10 @@ func checkPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
+// --- 系统状态和连接信息相关的结构体 ---
 type ActiveConnInfo struct {
 	Writer                 net.Conn
-	LastActive             atomic.Int64 // <-- 2. 修改: 改为原子类型以实现安全的心跳更新
+	LastActive             atomic.Int64 // 改为原子类型，用于线程安全的心跳更新
 	DeviceID               string
 	Credential             string
 	FirstConnection        time.Time
@@ -200,7 +206,6 @@ type ActiveConnInfo struct {
 	LastTotalBytesForSpeed int64
 	CurrentSpeedBps        float64
 }
-
 type SystemStatus struct {
 	Uptime        string  `json:"uptime"`
 	CPUPercent    float64 `json:"cpu_percent"`
@@ -223,6 +228,7 @@ var (
 	adminPanelHTML      []byte
 	loginPanelHTML      []byte
 )
+
 func InitMetrics() {
 	cfg := GetConfig()
 	devices := cfg.GetDeviceIDs()
@@ -240,7 +246,9 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// 审计功能 auditActiveConnections (无变化, 逻辑依然健壮)
+// --- 后台周期性任务 ---
+
+// “公告板”审计功能，负责执行管理员策略
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
@@ -289,7 +297,6 @@ func auditActiveConnections() {
 		return true
 	})
 }
-// 定时任务 (无变化)
 func runPeriodicTasks() {
 	saveTicker := time.NewTicker(5 * time.Second)
 	go func() {
@@ -341,10 +348,9 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived)
 }
 
+// --- 核心网络连接处理 ---
 
-// ==============================================================================
-// === 3. 核心修改: `handleClient` 现在包含应用层心跳监控 ===
-// ==============================================================================
+// 经过稳定性优化的核心连接处理函数
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -396,7 +402,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 			if err != io.EOF { Print("[-] Handshake read error from %s: %v", remoteIP, err) } else { Print("[-] Client %s closed connection during handshake.", remoteIP) }
 			return
 		}
-		connInfo.LastActive.Store(time.Now().Unix()) // 握手期间的活动也算心跳
+		connInfo.LastActive.Store(time.Now().Unix())
 		var headerBuilder strings.Builder
 		_ = req.Header.Write(&headerBuilder)
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
@@ -502,13 +508,16 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 	}
 
-	// 启动应用层心跳监察员
-	// 超时时间使用配置中的 Timeout，但增加一个合理的最小值（例如90秒）
+	// 启动应用层心跳监察员，清理僵尸连接
 	idleTimeout := time.Duration(settings.Timeout) * time.Second
 	if idleTimeout < 90*time.Second {
 		idleTimeout = 90 * time.Second
 	}
-	go func() {
+	// 创建一个与 handleClient 函数生命周期绑定的 context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // 确保 handleClient 退出时，所有子 goroutine 都能收到信号
+
+	go func(innerCtx context.Context) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -521,88 +530,86 @@ func handleClient(conn net.Conn, isTLS bool) {
 					targetConn.Close()
 					return
 				}
+			case <-innerCtx.Done(): // 当 handleClient 即将退出时，监察员也退出
+				return
 			}
 		}
-	}()
+	}(ctx)
 
-	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go pipeTraffic(ctx, &wg, targetConn, conn, connInfo, credential, true)  // 上行
-	go pipeTraffic(ctx, &wg, conn, targetConn, connInfo, credential, false) // 下行
+	// 启动双向、独立的流量转发 Goroutine
+	go pipeTraffic(&wg, targetConn, conn, connInfo, credential, true, cancel)  // 上行
+	go pipeTraffic(&wg, conn, targetConn, connInfo, credential, false, cancel) // 下行
 	
 	wg.Wait()
-	cancel()
 }
 
-// ==============================================================================
-// === 4. 核心修改: `pipeTraffic` 拆分为双向独立的 Goroutine ===
-// ==============================================================================
-func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst io.WriteCloser, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool) {
+// 经过稳定性优化的数据转发函数
+func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
-	
+	defer cancel() // 任何一个方向的 pipe 结束，都调用 cancel() 来通知另一个方向和心跳监察员退出
+
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
 
-	// 使用 io.CopyBuffer 进行循环读写，以实现更快的半开连接检测
 	for {
-		select {
-		case <-ctx.Done(): // 如果另一路已经结束，这里会收到信号
-			return
-		default:
-			// 从源读取数据
-			// 为 src 添加一个读取超时，可以更快地检测到连接假死
-			if conn, ok := src.(net.Conn); ok {
-				_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-			}
-			nr, er := src.Read(buf)
-			if nr > 0 {
-				// 成功读取到数据，写入目标
-				nw, ew := dst.Write(buf[0:nr])
-				if ew != nil {
+		// 为读操作设置超时，以快速检测僵尸连接
+		if conn, ok := src.(net.Conn); ok {
+			_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
+		}
+		nr, er := src.Read(buf)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if ew != nil {
+				// 忽略在连接已关闭时写入造成的 "use of closed network connection" 错误
+				if !strings.Contains(ew.Error(), "use of closed network connection") {
 					Print("[!] pipeTraffic: write error (isUpload: %v): %v", isUpload, ew)
-					return // 写入失败，本路结束
 				}
-				if nr != nw {
-					Print("[!] pipeTraffic: short write (isUpload: %v)", isUpload)
-					return // 写入字节数不匹配，本路结束
-				}
-
-				// 更新流量统计和心跳
-				if isUpload {
-					atomic.AddInt64(&globalBytesSent, int64(nw))
-					atomic.AddInt64(&connInfo.BytesSent, int64(nw))
-				} else {
-					atomic.AddInt64(&globalBytesReceived, int64(nw))
-					atomic.AddInt64(&connInfo.BytesReceived, int64(nw))
-				}
-				if credential != "" {
-					if val, ok := deviceUsage.Load(credential); ok {
-						atomic.AddInt64(val.(*int64), int64(nw))
-					}
-				}
-				connInfo.LastActive.Store(time.Now().Unix())
+				return
 			}
-			if er != nil {
-				if er != io.EOF {
-					// 忽略超时错误，因为它是我们用来检测假死的机制
-					if netErr, ok := er.(net.Error); ok && netErr.Timeout() {
-						continue 
-					}
+			if nr != nw {
+				Print("[!] pipeTraffic: short write (isUpload: %v)", isUpload)
+				return
+			}
+
+			// 更新流量统计和心跳时间戳
+			if isUpload {
+				atomic.AddInt64(&globalBytesSent, int64(nw))
+				atomic.AddInt64(&connInfo.BytesSent, int64(nw))
+			} else {
+				atomic.AddInt64(&globalBytesReceived, int64(nw))
+				atomic.AddInt64(&connInfo.BytesReceived, int64(nw))
+			}
+			if credential != "" {
+				if val, ok := deviceUsage.Load(credential); ok {
+					atomic.AddInt64(val.(*int64), int64(nw))
+				}
+			}
+			connInfo.LastActive.Store(time.Now().Unix())
+		}
+		if er != nil {
+			// 忽略我们主动设置的读超时错误
+			if netErr, ok := er.(net.Error); !ok || !netErr.Timeout() {
+				if er != io.EOF && !strings.Contains(er.Error(), "use of closed network connection") {
 					Print("[!] pipeTraffic: read error (isUpload: %v): %v", isUpload, er)
 				}
-				// 对方关闭连接(EOF)或发生不可恢复的错误，关闭写端并退出
-				if conn, ok := dst.(net.Conn); ok {
-					_ = conn.CloseWrite()
+				// 读到EOF或发生其他错误，尝试优雅地半关闭写端
+				if tcpConn, ok := dst.(net.Conn); ok {
+					if conn, ok := tcpConn.(*net.TCPConn); ok {
+						_ = conn.CloseWrite()
+					} else {
+						_ = tcpConn.Close()
+					}
 				}
-				return 
+				return
 			}
 		}
 	}
 }
 
-// --- 所有后台管理面板相关的函数 (大部分无变化) ---
+// --- 后台管理面板相关函数 (无重大变化) ---
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
@@ -632,7 +639,6 @@ const sessionCookieName = "wstunnel_session"
 type Session struct { Username string; Expiry time.Time }
 var (sessions = make(map[string]Session); sessionsLock sync.RWMutex)
 
-// 使用修复了无限刷新Bug的authMiddleware
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isAPIRequest := strings.HasPrefix(r.URL.Path, "/api/")
@@ -667,7 +673,6 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
-
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
@@ -791,7 +796,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 				if remainingBytes < 0 { remainingBytes = 0 }
 				remainingStr = formatBytes(remainingBytes)
 			}
-			lastActiveTimestamp := c.LastActive.Load() // <-- 修改: 原子读取
+			lastActiveTimestamp := c.LastActive.Load()
 			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
 			resp = append(resp, APIConnectionResponse{DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: lastActiveTime.Format("15:04:05"), ConnKey: c.ConnKey})
 		}
@@ -844,7 +849,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
-
 func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -1009,7 +1013,6 @@ func main() {
 	InitMetrics()
 	settings := cfg.GetSettings()
 	
-	// 初始化I/O缓冲区池
 	initBufferPool(settings.BufferSize)
 
 	runPeriodicTasks()
