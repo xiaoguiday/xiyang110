@@ -31,23 +31,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// I/O缓冲区池
-var bufferPool sync.Pool
-
-func initBufferPool(size int) {
-	if size <= 0 {
-		size = 32 * 1024
-	}
-	bufferPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, size)
-		},
-	}
-}
-
 const logBufferSize = 200
 
-// 环形日志缓冲区
+// RingBuffer and logging functions
 type RingBuffer struct {
 	mu     sync.RWMutex
 	buffer []string
@@ -77,15 +63,13 @@ func (rb *RingBuffer) GetLogs() []string {
 	}
 	return logs
 }
-
 var logBuffer *RingBuffer
-
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
 
-// --- 配置结构体与管理 (回归简单、可靠的模型) ---
 var ConfigFile = "ws_config.json"
 
+// Settings struct
 type Settings struct {
 	HTTPPort                     int      `json:"http_port"`
 	TLSPort                      int      `json:"tls_port"`
@@ -107,6 +91,8 @@ type Settings struct {
 	EnableIPBlacklist            bool     `json:"enable_ip_blacklist"`
 	EnableDeviceIDAuth           bool     `json:"enable_device_id_auth"`
 }
+
+// DeviceInfo struct
 type DeviceInfo struct {
 	FriendlyName string `json:"friendly_name"`
 	Expiry       string `json:"expiry"`
@@ -114,12 +100,13 @@ type DeviceInfo struct {
 	UsedBytes    int64  `json:"used_bytes"`
 	MaxSessions  int    `json:"max_sessions"`
 	Enabled      bool   `json:"enabled"`
-	UsedBytesAtomic atomic.Int64 `json:"-"`
 }
+
+// Config struct
 type Config struct {
 	Settings  Settings                `json:"settings"`
 	Accounts  map[string]string       `json:"accounts"`
-	DeviceIDs map[string]*DeviceInfo `json:"device_ids"`
+	DeviceIDs map[string]DeviceInfo `json:"device_ids"`
 	lock      sync.RWMutex
 }
 
@@ -129,46 +116,55 @@ var once sync.Once
 func GetConfig() *Config {
 	once.Do(func() {
 		globalConfig = &Config{}
-		if err := globalConfig.loadFromDisk(); err != nil {
+		if err := globalConfig.load(); err != nil {
 			Print("[!] FATAL: Could not load or create config file: %v", err)
 			os.Exit(1)
 		}
 	})
 	return globalConfig
 }
-func (c *Config) loadFromDisk() error {
+func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 32768, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
 	c.Accounts = map[string]string{"admin": "admin"}
-	c.DeviceIDs = make(map[string]*DeviceInfo)
+	c.DeviceIDs = make(map[string]DeviceInfo)
 	data, err := ioutil.ReadFile(ConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return c.saveToDisk()
+			Print("[*] %s not found, creating with default structure.", ConfigFile)
+			return c.save()
 		}
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
 	if err := json.Unmarshal(data, c); err != nil {
 		return fmt.Errorf("could not decode config file: %w. Please check its format", err)
 	}
-	for _, deviceInfo := range c.DeviceIDs {
-		deviceInfo.UsedBytesAtomic.Store(deviceInfo.UsedBytes)
-	}
 	return nil
 }
-func (c *Config) saveToDisk() error {
-	for _, deviceInfo := range c.DeviceIDs {
-		deviceInfo.UsedBytes = deviceInfo.UsedBytesAtomic.Load()
-	}
+func (c *Config) save() error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil { return fmt.Errorf("failed to marshal config: %w", err) }
-	
-	tmpFile := ConfigFile + ".tmp"
-	if err := ioutil.WriteFile(tmpFile, data, 0644); err != nil {
-		return fmt.Errorf("failed to write temp file: %w", err)
+	return ioutil.WriteFile(ConfigFile, data, 0644)
+}
+func (c *Config) SafeSave() error { c.lock.Lock(); defer c.lock.Unlock(); return c.save() }
+func (c *Config) GetSettings() Settings { c.lock.RLock(); defer c.lock.RUnlock(); return c.Settings }
+func (c *Config) GetAccounts() map[string]string {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	accts := make(map[string]string)
+	for k, v := range c.Accounts { accts[k] = v }
+	return accts
+}
+func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	devices := make(map[string]DeviceInfo)
+	for k, v := range c.DeviceIDs {
+		if v.MaxSessions < 1 { v.MaxSessions = 1 }
+		devices[k] = v
 	}
-	return os.Rename(tmpFile, ConfigFile)
+	return devices
 }
 
 func hashPassword(password string) (string, error) {
@@ -179,21 +175,23 @@ func checkPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
 }
+
 type ActiveConnInfo struct {
 	Writer                 net.Conn
-	LastActive             atomic.Int64
+	LastActive             int64
 	DeviceID               string
 	Credential             string
 	FirstConnection        time.Time
 	Status                 string
 	IP                     string
-	BytesSent              atomic.Int64
-	BytesReceived          atomic.Int64
+	BytesSent              int64
+	BytesReceived          int64
 	ConnKey                string
 	LastSpeedUpdateTime    time.Time
 	LastTotalBytesForSpeed int64
 	CurrentSpeedBps        float64
 }
+
 type SystemStatus struct {
 	Uptime        string  `json:"uptime"`
 	CPUPercent    float64 `json:"cpu_percent"`
@@ -204,16 +202,28 @@ type SystemStatus struct {
 	BytesSent     int64   `json:"bytes_sent"`
 	BytesReceived int64   `json:"bytes_received"`
 }
+
 var (
-	globalBytesSent     atomic.Int64
-	globalBytesReceived atomic.Int64
+	globalBytesSent     int64
+	globalBytesReceived int64
 	activeConns         sync.Map
+	deviceUsage         sync.Map
 	startTime           = time.Now()
 	systemStatus        SystemStatus
 	systemStatusMutex   sync.RWMutex
 	adminPanelHTML      []byte
 	loginPanelHTML      []byte
 )
+
+func InitMetrics() {
+	cfg := GetConfig()
+	devices := cfg.GetDeviceIDs()
+	for id, info := range devices {
+		initialUsage := info.UsedBytes
+		deviceUsage.Store(id, &initialUsage)
+	}
+}
+
 func AddActiveConn(key string, conn *ActiveConnInfo) { activeConns.Store(key, conn) }
 func RemoveActiveConn(key string)                 { activeConns.Delete(key) }
 func GetActiveConn(key string) (*ActiveConnInfo, bool) {
@@ -222,82 +232,121 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	}
 	return nil, false
 }
+
+// ==============================================================================
+// === 1. 新增：这是功能最完整、最高效的“公告板”/“巡查手册”实现 ===
+// ==============================================================================
 func auditActiveConnections() {
 	cfg := GetConfig()
+	settings := cfg.GetSettings()
+	devices := cfg.GetDeviceIDs() // 在巡查开始前，一次性获取所有设备规则的“快照”
+
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
-		
-		cfg.lock.RLock()
-		settings := cfg.Settings
-		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
-			cfg.lock.RUnlock()
-			Print("[审计] 触发踢出: IP %s 在黑名单中", connInfo.IP)
-			connInfo.Writer.Close()
-			return true 
-		}
-		if !settings.EnableDeviceIDAuth {
-			cfg.lock.RUnlock()
-			return true
-		}
-		if connInfo.Credential == "" {
-			cfg.lock.RUnlock()
-			Print("[审计] 触发踢出: 连接无凭证 (IP: %s)", connInfo.IP)
-			connInfo.Writer.Close()
-			return true
-		}
-		deviceInfo, ok := cfg.DeviceIDs[connInfo.Credential]
-		cfg.lock.RUnlock()
 
-		if !ok {
-			Print("[审计] 触发踢出: 设备 %s 已被删除", connInfo.DeviceID)
+		// 规则：IP黑名单检查
+		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
+			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
 			connInfo.Writer.Close()
+			return true // 继续巡查下一个
+		}
+
+		// 规则：如果ID认证被关闭，则后续所有与设备相关的规则都不再检查
+		if !settings.EnableDeviceIDAuth {
 			return true
 		}
-		if !deviceInfo.Enabled {
-			Print("[审计] 触发踢出: 设备 %s 已被禁用", connInfo.DeviceID)
-			connInfo.Writer.Close()
-			return true
-		}
-		expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
-		if err == nil {
-			if time.Now().After(expiry.Add(24 * time.Hour)) {
-				Print("[审计] 触发踢出: 设备 %s 已过期", connInfo.DeviceID)
+
+		// 规则：检查连接是否持有有效的设备凭证
+		if connInfo.Credential != "" {
+			// 在“快照”中查找当前连接对应的设备规则
+			if devInfo, ok := devices[connInfo.Credential]; ok {
+				
+				// 子规则 a: 设备是否被手动禁用
+				if !devInfo.Enabled {
+					Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+					connInfo.Writer.Close()
+					return true
+				}
+
+				// 子规则 b: 设备是否已过期
+				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
+				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
+					Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+					connInfo.Writer.Close()
+					return true
+				}
+
+				// 子规则 c: 设备流量是否已超限
+				if devInfo.LimitGB > 0 {
+					if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
+						currentUsage := atomic.LoadInt64(usageVal.(*int64))
+						if currentUsage >= int64(devInfo.LimitGB)*1024*1024*1024 {
+							Print("[-] [审计] 踢出流量超限设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+							connInfo.Writer.Close()
+							return true
+						}
+					}
+				}
+			} else {
+				// 规则：如果凭证在当前设备列表中已不存在（即设备被删除）
+				Print("[-] [审计] 踢出已删除设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 				connInfo.Writer.Close()
 				return true
 			}
+		} else {
+			// 规则：对于没有凭证的连接，如果此时ID认证是开启的，则为非法连接
+			Print("[-] [审计] 踢出无凭证的非法连接 (IP: %s)", connInfo.IP)
+			connInfo.Writer.Close()
+			return true
 		}
-		if deviceInfo.LimitGB > 0 {
-			currentUsage := deviceInfo.UsedBytesAtomic.Load()
-			limitBytes := int64(deviceInfo.LimitGB) * 1024 * 1024 * 1024
-			if currentUsage >= limitBytes {
-				Print("[审计] 触发踢出: 设备 %s 流量超限", connInfo.DeviceID)
-				connInfo.Writer.Close()
-				return true
-			}
-		}
-		return true
+
+		return true // 当前连接合规，继续巡查下一个
 	})
 }
+
+// ==============================================================================
+// === 2. 修改：移除了旧的循环事件，现在只由新的“公告板”负责巡查 ===
+// ==============================================================================
 func runPeriodicTasks() {
-	cfg := GetConfig()
-	diskSaveTicker := time.NewTicker(30 * time.Second)
+	// 任务1: 每5秒保存一次设备流量使用情况
+	saveTicker := time.NewTicker(5 * time.Second)
 	go func() {
-		for range diskSaveTicker.C {
-			cfg.lock.Lock()
-			if err := cfg.saveToDisk(); err != nil {
-				Print("[!] 定期保存配置失败: %v", err)
-			}
-			cfg.lock.Unlock()
-		}
+		for range saveTicker.C { saveDeviceUsage() }
 	}()
+
+	// 任务2: 每2秒收集一次服务器状态信息
 	statusTicker := time.NewTicker(2 * time.Second)
 	go func() {
 		for range statusTicker.C { collectSystemStatus() }
 	}()
+
+	// 任务3: 每15秒启动一次“公告板”巡查
 	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C { auditActiveConnections() }
 	}()
+}
+
+func saveDeviceUsage() {
+	cfg := GetConfig()
+	cfg.lock.Lock()
+	defer cfg.lock.Unlock()
+	isDirty := false
+	deviceUsage.Range(func(key, value interface{}) bool {
+		id := key.(string)
+		currentUsage := value.(*int64)
+		if info, ok := cfg.DeviceIDs[id]; ok {
+			if info.UsedBytes != atomic.LoadInt64(currentUsage) {
+				info.UsedBytes = atomic.LoadInt64(currentUsage)
+				cfg.DeviceIDs[id] = info
+				isDirty = true
+			}
+		}
+		return true
+	})
+	if isDirty {
+		if err := cfg.save(); err != nil { Print("[!] Failed to save device usage: %v", err) }
+	}
 }
 func collectSystemStatus() {
 	systemStatusMutex.Lock()
@@ -311,65 +360,10 @@ func collectSystemStatus() {
 		systemStatus.MemUsed = vm.Used
 		systemStatus.MemPercent, _ = strconv.ParseFloat(fmt.Sprintf("%.1f", vm.UsedPercent), 64)
 	}
-	systemStatus.BytesSent = globalBytesSent.Load()
-	systemStatus.BytesReceived = globalBytesReceived.Load()
+	systemStatus.BytesSent = atomic.LoadInt64(&globalBytesSent)
+	systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived)
 }
-type writeTracker struct {
-	io.Writer
-	connInfo   *ActiveConnInfo
-	deviceInfo *DeviceInfo
-	isUpload   bool
-}
-func (wt *writeTracker) Write(p []byte) (n int, err error) {
-	n, err = wt.Writer.Write(p)
-	if n > 0 {
-		if wt.isUpload {
-			globalBytesSent.Add(int64(n))
-			wt.connInfo.BytesSent.Add(int64(n))
-		} else {
-			globalBytesReceived.Add(int64(n))
-			wt.connInfo.BytesReceived.Add(int64(n))
-		}
-		if wt.deviceInfo != nil {
-			wt.deviceInfo.UsedBytesAtomic.Add(int64(n))
-		}
-		wt.connInfo.LastActive.Store(time.Now().Unix())
-	}
-	return
-}
-type readTracker struct {
-	io.Reader
-	connInfo *ActiveConnInfo
-}
-func (rt *readTracker) Read(p []byte) (n int, err error) {
-	n, err = rt.Reader.Read(p)
-	if n > 0 {
-		rt.connInfo.LastActive.Store(time.Now().Unix())
-	}
-	return
-}
-func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, deviceInfo *DeviceInfo, isUpload bool, cancel context.CancelFunc) {
-	defer wg.Done()
-	defer cancel()
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
-	writerWithTracking := &writeTracker{
-		Writer:     dst,
-		connInfo:   connInfo,
-		deviceInfo: deviceInfo,
-		isUpload:   isUpload,
-	}
-	readerWithTracking := &readTracker{
-		Reader:   src,
-		connInfo: connInfo,
-	}
-	io.CopyBuffer(writerWithTracking, readerWithTracking, buf)
-	if tcpConn, ok := dst.(net.Conn); ok {
-		if conn, ok := tcpConn.(*net.TCPConn); ok {
-			_ = conn.CloseWrite()
-		}
-	}
-}
+
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -379,17 +373,13 @@ func handleClient(conn net.Conn, isTLS bool) {
 	}()
 
 	cfg := GetConfig()
+	settings := cfg.GetSettings()
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-
-	cfg.lock.RLock()
-	settings := cfg.Settings
-	cfg.lock.RUnlock()
-
 	if settings.EnableIPBlacklist && isIPInList(remoteIP, settings.IPBlacklist) {
 		Print("[-] Connection from blacklisted IP %s rejected.", remoteIP)
 		return
@@ -399,15 +389,14 @@ func handleClient(conn net.Conn, isTLS bool) {
 		return
 	}
 
-	connInfo := &ActiveConnInfo{
+	AddActiveConn(connKey, &ActiveConnInfo{
 		Writer:          conn,
 		IP:              remoteIP,
 		ConnKey:         connKey,
 		FirstConnection: time.Now(),
+		LastActive:      time.Now().Unix(),
 		Status:          "握手",
-	}
-	connInfo.LastActive.Store(time.Now().Unix())
-	AddActiveConn(connKey, connInfo)
+	})
 	defer RemoveActiveConn(connKey)
 
 	reader := bufio.NewReader(conn)
@@ -416,7 +405,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var headersText string
 	var finalDeviceID string
 	var credential string
-	var deviceInfo *DeviceInfo
+	var deviceInfo DeviceInfo
 
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(settings.Timeout) * time.Second))
@@ -425,12 +414,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 			if err != io.EOF { Print("[-] Handshake read error from %s: %v", remoteIP, err) } else { Print("[-] Client %s closed connection during handshake.", remoteIP) }
 			return
 		}
-		connInfo.LastActive.Store(time.Now().Unix())
 		var headerBuilder strings.Builder
 		_ = req.Header.Write(&headerBuilder)
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
 		body, _ := ioutil.ReadAll(req.Body)
 		initialData = body
+
 		credential = req.Header.Get("Sec-WebSocket-Key")
 		var found bool
 		if credential != "" {
@@ -459,7 +448,15 @@ func handleClient(conn net.Conn, isTLS bool) {
 				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
 			}
-			if deviceInfo.LimitGB > 0 && deviceInfo.UsedBytesAtomic.Load() >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
+			var deviceUsagePtr *int64
+			if val, ok := deviceUsage.Load(credential); ok {
+				deviceUsagePtr = val.(*int64)
+			} else {
+				newUsage := deviceInfo.UsedBytes
+				deviceUsage.Store(credential, &newUsage)
+				deviceUsagePtr = &newUsage
+			}
+			if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
 				Print("[!] Auth Enabled: Traffic limit reached for '%s'. Rejecting.", finalDeviceID)
 				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
@@ -469,8 +466,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 				finalDeviceID = remoteIP
 			}
 		}
-		connInfo.DeviceID = finalDeviceID
-		connInfo.Credential = credential
+
+		if connInfo, ok := GetActiveConn(connKey); ok {
+			connInfo.DeviceID = finalDeviceID
+			connInfo.Credential = credential
+		}
+
 		ua := req.UserAgent()
 		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
 			Print("[*] Received probe from %s for device '%s'. Awaiting WS handshake.", remoteIP, finalDeviceID)
@@ -479,7 +480,9 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-			connInfo.Status = "活跃"
+			if connInfo, ok := GetActiveConn(connKey); ok {
+				connInfo.Status = "活跃"
+			}
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
@@ -511,43 +514,73 @@ func handleClient(conn net.Conn, isTLS bool) {
 		tcpTargetConn.SetKeepAlive(true)
 		tcpTargetConn.SetKeepAlivePeriod(30 * time.Second)
 	}
+
 	if len(initialData) > 0 {
-		_, err := targetConn.Write(initialData)
-		if err != nil {
-			Print("[!] Failed to write initial data to target: %v", err)
-			return
-		}
+		_, _ = targetConn.Write(initialData)
 	}
+
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	idleTimeout := time.Duration(settings.Timeout) * time.Second
-	if idleTimeout < 90*time.Second {
-		idleTimeout = 90 * time.Second
-	}
-	go func(innerCtx context.Context) {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				lastActive := connInfo.LastActive.Load()
-				if time.Now().Unix()-lastActive > int64(idleTimeout.Seconds()) {
-					Print("[-] [心跳] Kicking idle connection for device %s from %s", finalDeviceID, remoteIP)
-					conn.Close()
-					targetConn.Close()
-					return
-				}
-			case <-innerCtx.Done():
-				return
-			}
-		}
-	}(ctx)
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go pipeTraffic(&wg, targetConn, conn, connInfo, deviceInfo, true, cancel)
-	go pipeTraffic(&wg, conn, targetConn, connInfo, deviceInfo, false, cancel)
+	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true, settings.BufferSize)
+	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false, settings.BufferSize)
 	wg.Wait()
+	cancel()
 }
+
+type copyTracker struct {
+	io.Writer
+	ConnInfo     *ActiveConnInfo
+	DeviceID     string
+	Credential   string
+	IsUpload     bool
+	DeviceUsagePtr *int64
+}
+
+func (c *copyTracker) Write(p []byte) (n int, err error) {
+	n, err = c.Writer.Write(p)
+	if n > 0 {
+		if c.IsUpload {
+			atomic.AddInt64(&globalBytesSent, int64(n))
+			atomic.AddInt64(&c.ConnInfo.BytesSent, int64(n))
+		} else {
+			atomic.AddInt64(&globalBytesReceived, int64(n))
+			atomic.AddInt64(&c.ConnInfo.BytesReceived, int64(n))
+		}
+		if c.Credential != "" && c.DeviceUsagePtr != nil {
+			atomic.AddInt64(c.DeviceUsagePtr, int64(n))
+		}
+		atomic.StoreInt64(&c.ConnInfo.LastActive, time.Now().Unix())
+	}
+	return
+}
+
+func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool, bufferSize int) {
+	defer wg.Done()
+	connInfo, ok := GetActiveConn(connKey)
+	if !ok { return }
+	var deviceUsagePtr *int64
+	if credential != "" {
+		if val, ok := deviceUsage.Load(credential); ok {
+			deviceUsagePtr = val.(*int64)
+		}
+	}
+	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
+
+	if bufferSize <= 0 {
+		bufferSize = 32 * 1024
+	}
+	buf := make([]byte, bufferSize)
+
+	n, err := io.CopyBuffer(tracker, src, buf)
+	if err != nil && err != io.EOF {
+		Print("[!] pipeTraffic error (isUpload: %v, device: %s): %v. Copied %d bytes.", isUpload, deviceID, err, n)
+	}
+	if tcpConn, ok := dst.(*net.TCPConn); ok {
+		_ = tcpConn.CloseWrite()
+	}
+}
+
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
@@ -572,12 +605,18 @@ func runCommand(command string, args ...string) (bool, string) {
 	return true, out.String()
 }
 func manageSshUser(username, password, action string) (bool, string) { return false, "SSH user management is complex and platform-dependent, implementation omitted." }
+
 const sessionCookieName = "wstunnel_session"
 type Session struct { Username string; Expiry time.Time }
 var (sessions = make(map[string]Session); sessionsLock sync.RWMutex)
+
+// ==============================================================================
+// === 额外修复: 这是修复了无限刷新Bug的authMiddleware实现 ===
+// ==============================================================================
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isAPIRequest := strings.HasPrefix(r.URL.Path, "/api/")
+
 		cookie, err := r.Cookie(sessionCookieName)
 		if err != nil {
 			if isAPIRequest {
@@ -588,9 +627,11 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 			}
 			return
 		}
+
 		sessionsLock.RLock()
 		session, ok := sessions[cookie.Value]
 		sessionsLock.RUnlock()
+
 		if !ok || time.Now().After(session.Expiry) {
 			if ok {
 				sessionsLock.Lock()
@@ -605,10 +646,12 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 			}
 			return
 		}
+
 		ctx := context.WithValue(r.Context(), "user", session.Username)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
+
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
@@ -685,6 +728,7 @@ type APIConnectionResponse struct {
 	LastActive   string `json:"last_active"`
 	ConnKey      string `json:"conn_key"`
 }
+
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -704,19 +748,12 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }
 			return conns[i].FirstConnection.Before(conns[j].FirstConnection)
 		})
-		
-		cfg.lock.RLock()
-		devices := make(map[string]*DeviceInfo)
-		for k, v := range cfg.DeviceIDs {
-			devices[k] = v
-		}
-		cfg.lock.RUnlock()
-
+		devices := cfg.GetDeviceIDs()
 		resp := []APIConnectionResponse{}
 		now := time.Now()
 		for _, c := range conns {
-			bytesSent := c.BytesSent.Load()
-			bytesReceived := c.BytesReceived.Load()
+			bytesSent := atomic.LoadInt64(&c.BytesSent)
+			bytesReceived := atomic.LoadInt64(&c.BytesReceived)
 			if c.Status == "活跃" {
 				timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds()
 				if timeDelta >= 2 {
@@ -727,25 +764,20 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 					c.LastTotalBytesForSpeed = currentTotalBytes
 				}
 			}
-			var deviceInfo *DeviceInfo
+			var deviceInfo DeviceInfo
 			var found bool
 			if c.Credential != "" { deviceInfo, found = devices[c.Credential] }
 			remainingStr := "无限制"
 			if found && deviceInfo.LimitGB > 0 {
-				currentUsage := deviceInfo.UsedBytesAtomic.Load()
+				var currentUsage int64
+				if val, ok := deviceUsage.Load(c.Credential); ok { currentUsage = atomic.LoadInt64(val.(*int64)) }
 				remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - currentUsage
 				if remainingBytes < 0 { remainingBytes = 0 }
 				remainingStr = formatBytes(remainingBytes)
 			}
-			lastActiveTimestamp := c.LastActive.Load()
+			lastActiveTimestamp := atomic.LoadInt64(&c.LastActive)
 			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
-			
-			expiryStr := ""
-			if deviceInfo != nil {
-				expiryStr = deviceInfo.Expiry
-			}
-
-			resp = append(resp, APIConnectionResponse{DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: expiryStr, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: lastActiveTime.Format("15:04:05"), ConnKey: c.ConnKey})
+			resp = append(resp, APIConnectionResponse{DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: lastActiveTime.Format("15:04:05"), ConnKey: c.ConnKey})
 		}
 		sendJSON(w, http.StatusOK, resp)
 	case "/api/kick":
@@ -759,11 +791,10 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	case "/api/device_usage":
 		usageMap := make(map[string]int64)
-		cfg.lock.RLock()
-		for id, info := range cfg.DeviceIDs {
-			usageMap[id] = info.UsedBytesAtomic.Load()
-		}
-		cfg.lock.RUnlock()
+		deviceUsage.Range(func(key, value interface{}) bool {
+			usageMap[key.(string)] = atomic.LoadInt64(value.(*int64))
+			return true
+		})
 		sendJSON(w, http.StatusOK, usageMap)
 	case "/api/logs":
 		sendJSON(w, http.StatusOK, logBuffer.GetLogs())
@@ -772,31 +803,19 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		defer systemStatusMutex.RUnlock()
 		sendJSON(w, http.StatusOK, systemStatus)
 	case "/api/devices":
-		cfg.lock.RLock()
-		devices := make(map[string]*DeviceInfo)
-		for k, v := range cfg.DeviceIDs {
-			devices[k] = v
-		}
-		cfg.lock.RUnlock()
-		sendJSON(w, http.StatusOK, devices)
+		sendJSON(w, http.StatusOK, cfg.GetDeviceIDs())
 	case "/api/settings":
-		cfg.lock.RLock()
-		settings := cfg.Settings
-		cfg.lock.RUnlock()
-		sendJSON(w, http.StatusOK, settings)
+		sendJSON(w, http.StatusOK, cfg.GetSettings())
 	case "/api/settings/toggle_device_auth":
 		enable, _ := reqData["enable"].(bool)
 		cfg.lock.Lock()
 		cfg.Settings.EnableDeviceIDAuth = enable
-		if err := cfg.saveToDisk(); err != nil {
-			cfg.lock.Unlock()
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
-			return
-		}
 		cfg.lock.Unlock()
-		statusText := "开启"
-		if !enable { statusText = "关闭" }
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else {
+			statusText := "开启"
+			if !enable { statusText = "关闭" }
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
+		}
 	case "/api/ssh/create", "/api/ssh/delete":
 		action := filepath.Base(r.URL.Path)
 		username, _ := reqData["username"].(string)
@@ -809,6 +828,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+
 func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -831,36 +851,29 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		var ms int
 		if val, ok := maxSessionsRaw.(float64); ok { ms = int(val) } else { ms = 1 }
 		if ms < 1 { ms = 1 }
-		
 		cfg.lock.Lock()
-		cfg.DeviceIDs[secWSKey] = &DeviceInfo{FriendlyName: friendlyName, Expiry: exp, LimitGB: limit, UsedBytes: 0, MaxSessions: ms, Enabled: true}
-		if err := cfg.saveToDisk(); err != nil {
-			cfg.lock.Unlock()
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
-			return
-		}
+		cfg.DeviceIDs[secWSKey] = DeviceInfo{FriendlyName: friendlyName, Expiry: exp, LimitGB: limit, UsedBytes: 0, MaxSessions: ms, Enabled: true}
 		cfg.lock.Unlock()
-		
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
+		newUsage := int64(0)
+		deviceUsage.Store(secWSKey, &newUsage)
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"}) }
 	case "/device/set_status":
 		secWSKey, ok1 := reqData["sec_ws_key"].(string)
 		enabled, ok2 := reqData["enabled"].(bool)
 		if !ok1 || !ok2 {
-			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求"})
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求，需要 sec_ws_key 和 enabled 状态"})
 			return
 		}
 		cfg.lock.Lock()
 		if info, ok := cfg.DeviceIDs[secWSKey]; ok {
 			info.Enabled = enabled
-			if err := cfg.saveToDisk(); err != nil {
-				cfg.lock.Unlock()
-				sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
-				return
-			}
+			cfg.DeviceIDs[secWSKey] = info
 			cfg.lock.Unlock()
-			statusText := "启用"
-			if !enabled { statusText = "禁用" }
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
+			if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()}) } else {
+				statusText := "启用"
+				if !enabled { statusText = "禁用" }
+				sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
+			}
 		} else {
 			cfg.lock.Unlock()
 			sendJSON(w, http.StatusNotFound, map[string]string{"status": "error", "message": "设备未找到"})
@@ -869,26 +882,19 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		secWSKey, _ := reqData["sec_ws_key"].(string)
 		cfg.lock.Lock()
 		delete(cfg.DeviceIDs, secWSKey)
-		if err := cfg.saveToDisk(); err != nil {
-			cfg.lock.Unlock()
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
-			return
-		}
 		cfg.lock.Unlock()
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"})
+		deviceUsage.Delete(secWSKey)
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"}) }
 	case "/device/reset_traffic":
 		secWSKey, _ := reqData["sec_ws_key"].(string)
+		if val, ok := deviceUsage.Load(secWSKey); ok { atomic.StoreInt64(val.(*int64), 0) }
 		cfg.lock.Lock()
 		if info, ok := cfg.DeviceIDs[secWSKey]; ok {
-			info.UsedBytesAtomic.Store(0)
-			if err := cfg.saveToDisk(); err != nil {
-				cfg.lock.Unlock()
-				sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
-				return
-			}
+			info.UsedBytes = 0
+			cfg.DeviceIDs[secWSKey] = info
 		}
 		cfg.lock.Unlock()
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"})
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }
 	case "/account/update":
 		ou, _ := reqData["old_user"].(string)
 		op, _ := reqData["old_pass"].(string)
@@ -919,31 +925,21 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		cfg.lock.Lock()
 		if ou != nu { delete(cfg.Accounts, ou) }
 		cfg.Accounts[nu] = h
-		if err := cfg.saveToDisk(); err != nil {
-			cfg.lock.Unlock()
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
-			return
-		}
 		cfg.lock.Unlock()
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }
 	case "/settings/save":
-		cfg.lock.RLock()
-		oldPorts := []int{cfg.Settings.HTTPPort, cfg.Settings.TLSPort, cfg.Settings.StatusPort}
-		cfg.lock.RUnlock()
-		
+		oldSettings := cfg.GetSettings()
+		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
 		var newSettings Settings
 		settingsBytes, _ := json.Marshal(reqData)
 		_ = json.Unmarshal(settingsBytes, &newSettings)
-		
 		cfg.lock.Lock()
 		cfg.Settings = newSettings
-		if err := cfg.saveToDisk(); err != nil {
-			cfg.lock.Unlock()
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: "+err.Error()})
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
 			return
 		}
-		cfg.lock.Unlock()
-		
 		newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}
 		portsChanged := false
 		for i := range oldPorts {
@@ -967,8 +963,8 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 				os.Exit(0)
 			}()
 		} else {
-			Print("[*] Settings updated and saved successfully.")
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存！"})
+			Print("[*] Settings updated and hot-reloaded successfully.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
 		}
 	}
 }
@@ -994,12 +990,8 @@ func main() {
 	}
 	Print("[*] WSTunnel-Go starting...")
 	cfg := GetConfig()
-	
-	cfg.lock.RLock()
-	settings := cfg.Settings
-	cfg.lock.RUnlock()
-	initBufferPool(settings.BufferSize)
-
+	InitMetrics()
+	settings := cfg.GetSettings()
 	runPeriodicTasks()
 
 	go func() {
