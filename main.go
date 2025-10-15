@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
+	"crypto/rand" // RE-ADDED: This is needed for session token generation
 	"crypto/tls"
-	"encoding/hex"
+	"encoding/hex" // RE-ADDED: This is needed for session token generation
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,10 +178,9 @@ func checkPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
-// *** LATEST CHANGE: ActiveConnInfo updated for atomic access ***
 type ActiveConnInfo struct {
 	Writer                 net.Conn
-	LastActive             int64 // Store Unix timestamp atomically
+	LastActive             int64
 	DeviceID               string
 	Credential             string
 	FirstConnection        time.Time
@@ -240,7 +239,6 @@ func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
 	devices := cfg.GetDeviceIDs()
-
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
@@ -248,9 +246,7 @@ func auditActiveConnections() {
 			connInfo.Writer.Close()
 			return true
 		}
-		if !settings.EnableDeviceIDAuth {
-			return true
-		}
+		if !settings.EnableDeviceIDAuth { return true }
 		if connInfo.Credential != "" {
 			if devInfo, ok := devices[connInfo.Credential]; ok {
 				if !devInfo.Enabled {
@@ -338,7 +334,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-
 	if settings.EnableIPBlacklist && isIPInList(remoteIP, settings.IPBlacklist) {
 		Print("[-] Connection from blacklisted IP %s rejected.", remoteIP)
 		return
@@ -348,7 +343,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		return
 	}
 
-	// *** LATEST CHANGE: Initialize ActiveConnInfo with Unix timestamp ***
 	AddActiveConn(connKey, &ActiveConnInfo{
 		Writer:          conn,
 		IP:              remoteIP,
@@ -497,7 +491,6 @@ type copyTracker struct {
 	DeviceUsagePtr *int64
 }
 
-// *** LATEST CHANGE: copyTracker.Write uses atomic operation for LastActive ***
 func (c *copyTracker) Write(p []byte) (n int, err error) {
 	n, err = c.Writer.Write(p)
 	if n > 0 {
@@ -515,7 +508,6 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	}
 	return
 }
-
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
@@ -529,7 +521,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 	buf := make([]byte, 32*1024)
 	n, err := io.CopyBuffer(tracker, src, buf)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		Print("[!] pipeTraffic error (isUpload: %v, device: %s): %v. Copied %d bytes.", isUpload, deviceID, err, n)
 	}
 	if tcpConn, ok := dst.(*net.TCPConn); ok {
@@ -591,8 +583,55 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 		next.ServeHTTP(w, r.WithContext(ctx))
 	}
 }
-func loginHandler(w http.ResponseWriter, r *http.Request) { /* ... NO CHANGE ... */ }
-func logoutHandler(w http.ResponseWriter, r *http.Request) { /* ... NO CHANGE ... */ }
+
+// *** FIXED: Re-added the full loginHandler function ***
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+		sendJSON(w, http.StatusBadRequest, map[string]string{"message": "无效的请求格式"})
+		return
+	}
+	cfg := GetConfig()
+	cfg.lock.RLock()
+	storedPass, accountOk := cfg.Accounts[creds.Username]
+	cfg.lock.RUnlock()
+	if !accountOk {
+		sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"})
+		return
+	}
+	valid := false
+	if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") {
+		valid = checkPasswordHash(creds.Password, storedPass)
+	} else {
+		valid = (creds.Password == storedPass)
+	}
+	if !valid {
+		sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"})
+		return
+	}
+	sessionTokenBytes := make([]byte, 32)
+	rand.Read(sessionTokenBytes)
+	sessionToken := hex.EncodeToString(sessionTokenBytes)
+	expiry := time.Now().Add(12 * time.Hour)
+	sessionsLock.Lock()
+	sessions[sessionToken] = Session{Username: creds.Username, Expiry: expiry}
+	sessionsLock.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionToken, Expires: expiry, Path: "/", HttpOnly: true})
+	sendJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err == nil {
+		sessionsLock.Lock()
+		delete(sessions, cookie.Value)
+		sessionsLock.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
+	w.WriteHeader(http.StatusOK)
+}
 func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	response, _ := json.Marshal(payload)
 	w.Header().Set("Content-Type", "application/json")
@@ -669,7 +708,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 				if remainingBytes < 0 { remainingBytes = 0 }
 				remainingStr = formatBytes(remainingBytes)
 			}
-			// *** LATEST CHANGE: Read LastActive atomically ***
 			lastActiveTimestamp := atomic.LoadInt64(&c.LastActive)
 			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
 			resp = append(resp, APIConnectionResponse{DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: lastActiveTime.Format("15:04:05"), ConnKey: c.ConnKey})
@@ -791,9 +829,76 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		cfg.lock.Unlock()
 		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }
 	case "/account/update":
-		// ... No change in logic ...
+		ou, _ := reqData["old_user"].(string)
+		op, _ := reqData["old_pass"].(string)
+		nu, _ := reqData["new_user"].(string)
+		np, _ := reqData["new_pass"].(string)
+		cfg.lock.RLock()
+		storedPass, ok := cfg.Accounts[ou]
+		cfg.lock.RUnlock()
+		if !ok {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"})
+			return
+		}
+		valid := false
+		if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") {
+			valid = checkPasswordHash(op, storedPass)
+		} else {
+			valid = (op == storedPass)
+		}
+		if !valid {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原密码错误"})
+			return
+		}
+		h, err := hashPassword(np)
+		if err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "密码加密失败"})
+			return
+		}
+		cfg.lock.Lock()
+		if ou != nu { delete(cfg.Accounts, ou) }
+		cfg.Accounts[nu] = h
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }
 	case "/settings/save":
-		// ... No change in logic ...
+		oldSettings := cfg.GetSettings()
+		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
+		var newSettings Settings
+		settingsBytes, _ := json.Marshal(reqData)
+		_ = json.Unmarshal(settingsBytes, &newSettings)
+		cfg.lock.Lock()
+		cfg.Settings = newSettings
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
+			return
+		}
+		newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}
+		portsChanged := false
+		for i := range oldPorts {
+			if oldPorts[i] != newPorts[i] {
+				portsChanged = true
+				break
+			}
+		}
+		if portsChanged {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
+			go func() {
+				time.Sleep(1 * time.Second)
+				Print("[*] Port settings changed. Restarting server...")
+				executable, _ := os.Executable()
+				cmd := exec.Command(executable, os.Args[1:]...)
+				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+				if err := cmd.Start(); err != nil {
+					Print("[!] FATAL: Failed to restart process: %v", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}()
+		} else {
+			Print("[*] Settings updated and hot-reloaded successfully.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
+		}
 	}
 }
 
