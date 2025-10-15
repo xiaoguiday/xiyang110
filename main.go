@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-// 2025-10-15-23-43
+
 // I/O缓冲区池
 var bufferPool sync.Pool
 
@@ -169,7 +169,6 @@ func (c *Config) GetAccounts() map[string]string {
 	for k, v := range c.Accounts { accts[k] = v }
 	return accts
 }
-// GetDeviceIDs 返回一个设备列表的“快照”，用于审计等需要一致性视图的场景
 func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -231,7 +230,6 @@ var (
 
 func InitMetrics() {
 	cfg := GetConfig()
-	// 注意：这里使用 GetDeviceIDs() 是正确的，因为只是在启动时初始化
 	devices := cfg.GetDeviceIDs()
 	for id, info := range devices {
 		initialUsage := info.UsedBytes
@@ -247,64 +245,87 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// --- 后台周期性任务 ---
+// ==============================================================================
+// === 终极修复：重写 auditActiveConnections 函数，保证逻辑清晰无误 ===
+// ==============================================================================
 func auditActiveConnections() {
-	Print("[审计日志] === 开始新一轮连接审计 (周期: 15秒) ===")
+	Print("[审计] === 开始新一轮连接审计 ===")
 
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
-	devices := cfg.GetDeviceIDs()
+	devices := cfg.GetDeviceIDs() // 获取最新的规则快照
 
-	foundActiveConns := false
 	activeConns.Range(func(key, value interface{}) bool {
-		foundActiveConns = true
 		connInfo := value.(*ActiveConnInfo)
+		
+		Print("[审计] 正在检查: IP=%s, Device=%s, Credential=%s", connInfo.IP, connInfo.DeviceID, connInfo.Credential)
 
-		// 审计日志可以保持，用于观察，生产环境可注释掉
-		Print("[审计日志] 正在检查连接: IP=%s, DeviceID=%s, Credential=%s", connInfo.IP, connInfo.DeviceID, connInfo.Credential)
-
-		if connInfo.Credential == "" { return true }
+		// 规则 1: 检查IP黑名单
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
-			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
+			Print("[审计] -> 触发踢出: IP被列入黑名单。")
+			connInfo.Writer.Close()
+			return true // 继续检查下一个
+		}
+
+		// 规则 2: 如果设备认证被全局关闭，则跳过所有后续设备相关的检查
+		if !settings.EnableDeviceIDAuth {
+			Print("[审计] -> 跳过: 设备ID认证已全局关闭。")
+			return true
+		}
+
+		// 规则 3: 连接必须有关联的凭证，否则为非法连接
+		if connInfo.Credential == "" {
+			Print("[审计] -> 触发踢出: 连接无凭证，但设备认证已开启。")
 			connInfo.Writer.Close()
 			return true
 		}
-		if !settings.EnableDeviceIDAuth { return true }
 
-		if devInfo, ok := devices[connInfo.Credential]; ok {
-			if !devInfo.Enabled {
-				Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+		// 规则 4: 凭证必须在当前设备列表中存在
+		devInfo, ok := devices[connInfo.Credential]
+		if !ok {
+			Print("[审计] -> 触发踢出: 设备凭证 '%s' 不再存在 (可能已被删除)。", connInfo.Credential)
+			connInfo.Writer.Close()
+			return true
+		}
+
+		// 规则 5: 设备必须是“启用”状态 (ID黑名单检查)
+		if !devInfo.Enabled {
+			Print("[审计] -> 触发踢出: 设备 '%s' 已被禁用。", connInfo.DeviceID)
+			connInfo.Writer.Close()
+			return true
+		}
+
+		// 规则 6: 检查设备是否过期
+		expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
+		if err == nil {
+			if time.Now().After(expiry.Add(24 * time.Hour)) {
+				Print("[审计] -> 触发踢出: 设备 '%s' 已于 '%s' 过期。", connInfo.DeviceID, devInfo.Expiry)
 				connInfo.Writer.Close()
 				return true
-			}
-			expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
-			if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
-				Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-				connInfo.Writer.Close()
-				return true
-			}
-			if devInfo.LimitGB > 0 {
-				if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
-					currentUsage := atomic.LoadInt64(usageVal.(*int64))
-					if currentUsage >= int64(devInfo.LimitGB)*1024*1024*1024 {
-						Print("[-] [审计] 踢出流量超限设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-						connInfo.Writer.Close()
-						return true
-					}
-				}
 			}
 		} else {
-			Print("[-] [审计] 踢出已删除设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-			connInfo.Writer.Close()
-			return true
+			Print("[审计] -> 警告: 无法解析设备 '%s' 的有效期 '%s': %v", connInfo.DeviceID, devInfo.Expiry, err)
 		}
-		return true
-	})
+		
+		// 规则 7: 检查流量是否超限
+		if devInfo.LimitGB > 0 {
+			if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
+				currentUsage := atomic.LoadInt64(usageVal.(*int64))
+				limitBytes := int64(devInfo.LimitGB) * 1024 * 1024 * 1024
+				if currentUsage >= limitBytes {
+					Print("[审计] -> 触发踢出: 设备 '%s' 流量超限 (已用: %s, 上限: %s)。", connInfo.DeviceID, formatBytes(currentUsage), formatBytes(limitBytes))
+					connInfo.Writer.Close()
+					return true
+				}
+			}
+		}
 
-	if !foundActiveConns {
-		Print("[审计日志] 本轮未发现任何活跃连接。")
-	}
+		Print("[审计] -> 检查通过: 连接合规。")
+		return true // 所有检查通过，继续检查下一个
+	})
 }
+
+
 func runPeriodicTasks() {
 	saveTicker := time.NewTicker(5 * time.Second)
 	go func() {
@@ -422,7 +443,7 @@ func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *Act
 	}
 }
 
-// --- 核心网络连接处理 ---
+
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -482,9 +503,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 
 		credential = req.Header.Get("Sec-WebSocket-Key")
 		
-		// ==========================================================
-		// === 核心 Bug 修复：直接读取全局配置以保证实时性 ===
-		// ==========================================================
 		var deviceInfo DeviceInfo
 		var found bool
 		if credential != "" {
@@ -621,8 +639,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 }
 
 
-// --- 后台管理面板相关函数 (无改动) ---
-// ... (所有 handleAPI, handleAdminPost, main 等函数保持原样)
+// --- 后台管理面板相关函数 ---
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
