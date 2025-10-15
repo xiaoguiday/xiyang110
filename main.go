@@ -4,9 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand" // RE-ADDED: This is needed for session token generation
+	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex" // RE-ADDED: This is needed for session token generation
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+// 2025-10-15-10-42 更新 缓冲区(Bytes)未生效问题
 const logBufferSize = 200
 
 // RingBuffer and logging functions
@@ -126,7 +126,7 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 8192, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
+	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 32768, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
 	c.Accounts = map[string]string{"admin": "admin"}
 	c.DeviceIDs = make(map[string]DeviceInfo)
 	data, err := ioutil.ReadFile(ConfigFile)
@@ -144,9 +144,7 @@ func (c *Config) load() error {
 }
 func (c *Config) save() error {
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
+	if err != nil { return fmt.Errorf("failed to marshal config: %w", err) }
 	return ioutil.WriteFile(ConfigFile, data, 0644)
 }
 func (c *Config) SafeSave() error { c.lock.Lock(); defer c.lock.Unlock(); return c.save() }
@@ -297,9 +295,7 @@ func saveDeviceUsage() {
 		return true
 	})
 	if isDirty {
-		if err := cfg.save(); err != nil {
-			Print("[!] Failed to save device usage: %v", err)
-		}
+		if err := cfg.save(); err != nil { Print("[!] Failed to save device usage: %v", err) }
 	}
 }
 func collectSystemStatus() {
@@ -476,8 +472,9 @@ func handleClient(conn net.Conn, isTLS bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true)
-	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false)
+	// *** LATEST CHANGE: Passing buffer size from settings to pipeTraffic ***
+	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true, settings.BufferSize)
+	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false, settings.BufferSize)
 	wg.Wait()
 	cancel()
 }
@@ -508,7 +505,9 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	}
 	return
 }
-func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
+
+// *** LATEST CHANGE: pipeTraffic now accepts and uses bufferSize from settings ***
+func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool, bufferSize int) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok { return }
@@ -519,7 +518,12 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		}
 	}
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
-	buf := make([]byte, 32*1024)
+
+	if bufferSize <= 0 {
+		bufferSize = 32 * 1024 // Default to 32KB if config is invalid
+	}
+	buf := make([]byte, bufferSize)
+
 	n, err := io.CopyBuffer(tracker, src, buf)
 	if err != nil && err != io.EOF {
 		Print("[!] pipeTraffic error (isUpload: %v, device: %s): %v. Copied %d bytes.", isUpload, deviceID, err, n)
@@ -584,7 +588,6 @@ func authMiddleware(next http.Handler) http.HandlerFunc {
 	}
 }
 
-// *** FIXED: Re-added the full loginHandler function ***
 func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct {
 		Username string `json:"username"`
