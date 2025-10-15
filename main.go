@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+// 2025-10-15-23-43
 // I/O缓冲区池
 var bufferPool sync.Pool
 
@@ -169,6 +169,7 @@ func (c *Config) GetAccounts() map[string]string {
 	for k, v := range c.Accounts { accts[k] = v }
 	return accts
 }
+// GetDeviceIDs 返回一个设备列表的“快照”，用于审计等需要一致性视图的场景
 func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -230,6 +231,7 @@ var (
 
 func InitMetrics() {
 	cfg := GetConfig()
+	// 注意：这里使用 GetDeviceIDs() 是正确的，因为只是在启动时初始化
 	devices := cfg.GetDeviceIDs()
 	for id, info := range devices {
 		initialUsage := info.UsedBytes
@@ -247,52 +249,61 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 
 // --- 后台周期性任务 ---
 func auditActiveConnections() {
+	Print("[审计日志] === 开始新一轮连接审计 (周期: 15秒) ===")
+
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
 	devices := cfg.GetDeviceIDs()
+
+	foundActiveConns := false
 	activeConns.Range(func(key, value interface{}) bool {
+		foundActiveConns = true
 		connInfo := value.(*ActiveConnInfo)
+
+		// 审计日志可以保持，用于观察，生产环境可注释掉
+		Print("[审计日志] 正在检查连接: IP=%s, DeviceID=%s, Credential=%s", connInfo.IP, connInfo.DeviceID, connInfo.Credential)
+
+		if connInfo.Credential == "" { return true }
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
 			connInfo.Writer.Close()
 			return true
 		}
 		if !settings.EnableDeviceIDAuth { return true }
-		if connInfo.Credential != "" {
-			if devInfo, ok := devices[connInfo.Credential]; ok {
-				if !devInfo.Enabled {
-					Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-					connInfo.Writer.Close()
-					return true
-				}
-				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
-				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
-					Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-					connInfo.Writer.Close()
-					return true
-				}
-				if devInfo.LimitGB > 0 {
-					if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
-						currentUsage := atomic.LoadInt64(usageVal.(*int64))
-						if currentUsage >= int64(devInfo.LimitGB)*1024*1024*1024 {
-							Print("[-] [审计] 踢出流量超限设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
-							connInfo.Writer.Close()
-							return true
-						}
-					}
-				}
-			} else {
-				Print("[-] [审计] 踢出已删除设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+
+		if devInfo, ok := devices[connInfo.Credential]; ok {
+			if !devInfo.Enabled {
+				Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 				connInfo.Writer.Close()
 				return true
 			}
+			expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
+			if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
+				Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+				connInfo.Writer.Close()
+				return true
+			}
+			if devInfo.LimitGB > 0 {
+				if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
+					currentUsage := atomic.LoadInt64(usageVal.(*int64))
+					if currentUsage >= int64(devInfo.LimitGB)*1024*1024*1024 {
+						Print("[-] [审计] 踢出流量超限设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
+						connInfo.Writer.Close()
+						return true
+					}
+				}
+			}
 		} else {
-			Print("[-] [审计] 踢出无凭证的非法连接 (IP: %s)", connInfo.IP)
+			Print("[-] [审计] 踢出已删除设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 			connInfo.Writer.Close()
 			return true
 		}
 		return true
 	})
+
+	if !foundActiveConns {
+		Print("[审计日志] 本轮未发现任何活跃连接。")
+	}
 }
 func runPeriodicTasks() {
 	saveTicker := time.NewTicker(5 * time.Second)
@@ -345,18 +356,13 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
 
-// ==============================================================================
-// === 核心修复：引入 Reader/Writer 包装器，实现双端心跳更新 ===
-// ==============================================================================
-
-// writeTracker 用于包裹 io.Writer, 在数据写入时更新统计和心跳
+// Reader/Writer 包装器，实现双端心跳更新
 type writeTracker struct {
 	io.Writer
 	connInfo   *ActiveConnInfo
 	isUpload   bool
 	credential string
 }
-
 func (wt *writeTracker) Write(p []byte) (n int, err error) {
 	n, err = wt.Writer.Write(p)
 	if n > 0 {
@@ -376,23 +382,19 @@ func (wt *writeTracker) Write(p []byte) (n int, err error) {
 	}
 	return
 }
-
-// readTracker 用于包裹 io.Reader, 在数据读取时更新心跳
 type readTracker struct {
 	io.Reader
 	connInfo *ActiveConnInfo
 }
-
 func (rt *readTracker) Read(p []byte) (n int, err error) {
 	n, err = rt.Reader.Read(p)
 	if n > 0 {
-		// 只要成功读到任何数据（包括客户端心跳），就更新活跃时间戳
 		rt.connInfo.LastActive.Store(time.Now().Unix())
 	}
 	return
 }
 
-// pipeTraffic 使用包装器来恢复 io.Copy 的高性能，同时实现双端心跳
+// pipeTraffic 使用包装器恢复 io.Copy 的高性能，同时实现双端心跳
 func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
 	defer cancel()
@@ -400,22 +402,19 @@ func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *Act
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
 
-	// 包裹 Writer 用于写统计和写端心跳
 	writerWithTracking := &writeTracker{
 		Writer:     dst,
 		connInfo:   connInfo,
 		isUpload:   isUpload,
 		credential: credential,
 	}
-
-	// 包裹 Reader 用于读端心跳
 	readerWithTracking := &readTracker{
 		Reader:   src,
 		connInfo: connInfo,
 	}
-
+	
 	io.CopyBuffer(writerWithTracking, readerWithTracking, buf)
-
+	
 	if tcpConn, ok := dst.(net.Conn); ok {
 		if conn, ok := tcpConn.(*net.TCPConn); ok {
 			_ = conn.CloseWrite()
@@ -466,7 +465,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var headersText string
 	var finalDeviceID string
 	var credential string
-	var deviceInfo DeviceInfo
 
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(settings.Timeout) * time.Second))
@@ -483,6 +481,11 @@ func handleClient(conn net.Conn, isTLS bool) {
 		initialData = body
 
 		credential = req.Header.Get("Sec-WebSocket-Key")
+		
+		// ==========================================================
+		// === 核心 Bug 修复：直接读取全局配置以保证实时性 ===
+		// ==========================================================
+		var deviceInfo DeviceInfo
 		var found bool
 		if credential != "" {
 			cfg.lock.RLock()
@@ -618,8 +621,8 @@ func handleClient(conn net.Conn, isTLS bool) {
 }
 
 
-// --- 后台管理面板相关函数 ---
-// (此部分无任何改动, 保持原样)
+// --- 后台管理面板相关函数 (无改动) ---
+// ... (所有 handleAPI, handleAdminPost, main 等函数保持原样)
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
