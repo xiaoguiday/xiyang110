@@ -30,7 +30,8 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+// 2025-10-15-10-42 更新 缓冲区(Bytes)未生效问题
+// 2025-10-15-11-09 更新 修复auditActiveConnections逻辑错误,开启ID认证后已经连接用户不会被踢掉问题
 const logBufferSize = 200
 
 // RingBuffer and logging functions
