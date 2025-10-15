@@ -31,7 +31,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// I/O缓冲区池，用于复用内存，降低GC压力
+// I/O缓冲区池，用于复用内存，降低GC压力。
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
@@ -73,7 +73,6 @@ func (rb *RingBuffer) GetLogs() []string {
 			logs = append(logs, rb.buffer[idx])
 		}
 	}
-	// 反转日志，使最新的日志在最前面
 	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
 		logs[i], logs[j] = logs[j], logs[i]
 	}
@@ -95,7 +94,7 @@ type Settings struct {
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	Timeout                      int      `json:"timeout"` // 也用作应用层心跳的超时时间
+	Timeout                      int      `json:"timeout"`
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -193,14 +192,14 @@ func checkPasswordHash(password, hash string) bool {
 // --- 系统状态和连接信息相关的结构体 ---
 type ActiveConnInfo struct {
 	Writer                 net.Conn
-	LastActive             atomic.Int64 // 改为原子类型，用于线程安全的心跳更新
+	LastActive             atomic.Int64
 	DeviceID               string
 	Credential             string
 	FirstConnection        time.Time
 	Status                 string
 	IP                     string
-	BytesSent              int64
-	BytesReceived          int64
+	BytesSent              atomic.Int64
+	BytesReceived          atomic.Int64
 	ConnKey                string
 	LastSpeedUpdateTime    time.Time
 	LastTotalBytesForSpeed int64
@@ -218,8 +217,8 @@ type SystemStatus struct {
 }
 
 var (
-	globalBytesSent     int64
-	globalBytesReceived int64
+	globalBytesSent     atomic.Int64
+	globalBytesReceived atomic.Int64
 	activeConns         sync.Map
 	deviceUsage         sync.Map
 	startTime           = time.Now()
@@ -247,8 +246,6 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 }
 
 // --- 后台周期性任务 ---
-
-// “公告板”审计功能，负责执行管理员策略
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
@@ -344,13 +341,68 @@ func collectSystemStatus() {
 		systemStatus.MemUsed = vm.Used
 		systemStatus.MemPercent, _ = strconv.ParseFloat(fmt.Sprintf("%.1f", vm.UsedPercent), 64)
 	}
-	systemStatus.BytesSent = atomic.LoadInt64(&globalBytesSent)
-	systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived)
+	systemStatus.BytesSent = globalBytesSent.Load()
+	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
 
 // --- 核心网络连接处理 ---
 
-// 经过稳定性优化的核心连接处理函数
+// 用于包裹 io.Writer, 以便在数据写入时更新统计和心跳
+type copyTracker struct {
+	io.Writer
+	connInfo   *ActiveConnInfo
+	isUpload   bool
+	credential string
+}
+
+func (ct *copyTracker) Write(p []byte) (n int, err error) {
+	n, err = ct.Writer.Write(p)
+	if n > 0 {
+		if ct.isUpload {
+			globalBytesSent.Add(int64(n))
+			ct.connInfo.BytesSent.Add(int64(n))
+		} else {
+			globalBytesReceived.Add(int64(n))
+			ct.connInfo.BytesReceived.Add(int64(n))
+		}
+		if ct.credential != "" {
+			if val, ok := deviceUsage.Load(ct.credential); ok {
+				atomic.AddInt64(val.(*int64), int64(n))
+			}
+		}
+		ct.connInfo.LastActive.Store(time.Now().Unix())
+	}
+	return
+}
+
+// 恢复到简单高效的 io.Copy 模型，以保证最高性能
+func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
+	defer wg.Done()
+	defer cancel()
+
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf)
+
+	tracker := &copyTracker{
+		Writer:     dst,
+		connInfo:   connInfo,
+		isUpload:   isUpload,
+		credential: credential,
+	}
+
+	// 使用 io.CopyBuffer, 它会调用我们自定义的 tracker.Write 方法
+	// 这样既能享受 io.Copy 的潜在性能优化（如零拷贝），又能实现我们的心跳更新
+	io.CopyBuffer(tracker, src, buf)
+	
+	// 当 io.Copy 结束后（因EOF或错误），尝试半关闭对端连接
+	if tcpConn, ok := dst.(net.Conn); ok {
+		if conn, ok := tcpConn.(*net.TCPConn); ok {
+			_ = conn.CloseWrite()
+		}
+	}
+}
+
+
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -508,15 +560,14 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 	}
 
-	// 启动应用层心跳监察员，清理僵尸连接
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	idleTimeout := time.Duration(settings.Timeout) * time.Second
 	if idleTimeout < 90*time.Second {
 		idleTimeout = 90 * time.Second
 	}
-	// 创建一个与 handleClient 函数生命周期绑定的 context
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // 确保 handleClient 退出时，所有子 goroutine 都能收到信号
-
+	
 	go func(innerCtx context.Context) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -530,7 +581,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 					targetConn.Close()
 					return
 				}
-			case <-innerCtx.Done(): // 当 handleClient 即将退出时，监察员也退出
+			case <-innerCtx.Done():
 				return
 			}
 		}
@@ -538,78 +589,15 @@ func handleClient(conn net.Conn, isTLS bool) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-
-	// 启动双向、独立的流量转发 Goroutine
-	go pipeTraffic(&wg, targetConn, conn, connInfo, credential, true, cancel)  // 上行
-	go pipeTraffic(&wg, conn, targetConn, connInfo, credential, false, cancel) // 下行
+	
+	go pipeTraffic(&wg, targetConn, conn, connInfo, credential, true, cancel)
+	go pipeTraffic(&wg, conn, targetConn, connInfo, credential, false, cancel)
 	
 	wg.Wait()
 }
 
-// 经过稳定性优化的数据转发函数
-func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
-	defer wg.Done()
-	defer cancel() // 任何一个方向的 pipe 结束，都调用 cancel() 来通知另一个方向和心跳监察员退出
 
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
-
-	for {
-		// 为读操作设置超时，以快速检测僵尸连接
-		if conn, ok := src.(net.Conn); ok {
-			_ = conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-		}
-		nr, er := src.Read(buf)
-		if nr > 0 {
-			nw, ew := dst.Write(buf[0:nr])
-			if ew != nil {
-				// 忽略在连接已关闭时写入造成的 "use of closed network connection" 错误
-				if !strings.Contains(ew.Error(), "use of closed network connection") {
-					Print("[!] pipeTraffic: write error (isUpload: %v): %v", isUpload, ew)
-				}
-				return
-			}
-			if nr != nw {
-				Print("[!] pipeTraffic: short write (isUpload: %v)", isUpload)
-				return
-			}
-
-			// 更新流量统计和心跳时间戳
-			if isUpload {
-				atomic.AddInt64(&globalBytesSent, int64(nw))
-				atomic.AddInt64(&connInfo.BytesSent, int64(nw))
-			} else {
-				atomic.AddInt64(&globalBytesReceived, int64(nw))
-				atomic.AddInt64(&connInfo.BytesReceived, int64(nw))
-			}
-			if credential != "" {
-				if val, ok := deviceUsage.Load(credential); ok {
-					atomic.AddInt64(val.(*int64), int64(nw))
-				}
-			}
-			connInfo.LastActive.Store(time.Now().Unix())
-		}
-		if er != nil {
-			// 忽略我们主动设置的读超时错误
-			if netErr, ok := er.(net.Error); !ok || !netErr.Timeout() {
-				if er != io.EOF && !strings.Contains(er.Error(), "use of closed network connection") {
-					Print("[!] pipeTraffic: read error (isUpload: %v): %v", isUpload, er)
-				}
-				// 读到EOF或发生其他错误，尝试优雅地半关闭写端
-				if tcpConn, ok := dst.(net.Conn); ok {
-					if conn, ok := tcpConn.(*net.TCPConn); ok {
-						_ = conn.CloseWrite()
-					} else {
-						_ = tcpConn.Close()
-					}
-				}
-				return
-			}
-		}
-	}
-}
-
-// --- 后台管理面板相关函数 (无重大变化) ---
+// --- 后台管理面板相关函数 ---
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
@@ -773,8 +761,8 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		resp := []APIConnectionResponse{}
 		now := time.Now()
 		for _, c := range conns {
-			bytesSent := atomic.LoadInt64(&c.BytesSent)
-			bytesReceived := atomic.LoadInt64(&c.BytesReceived)
+			bytesSent := c.BytesSent.Load()
+			bytesReceived := c.BytesReceived.Load()
 			if c.Status == "活跃" {
 				timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds()
 				if timeDelta >= 2 {
