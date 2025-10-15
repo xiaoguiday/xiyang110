@@ -30,7 +30,7 @@ import (
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
-
+// 修改数据存储方式，全部写入内容快照，5秒统一保存一次
 // I/O缓冲区池
 var bufferPool sync.Pool
 
@@ -84,7 +84,7 @@ var logBuffer *RingBuffer
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
 
-// --- 配置结构体与管理 ---
+// --- 配置结构体与管理 (按照您的新思路重构) ---
 var ConfigFile = "ws_config.json"
 
 type Settings struct {
@@ -116,37 +116,46 @@ type DeviceInfo struct {
 	MaxSessions  int    `json:"max_sessions"`
 	Enabled      bool   `json:"enabled"`
 }
+// Config 结构体现在是唯一的内存数据源
 type Config struct {
 	Settings  Settings                `json:"settings"`
 	Accounts  map[string]string       `json:"accounts"`
 	DeviceIDs map[string]DeviceInfo `json:"device_ids"`
-	lock      sync.RWMutex
+	
+	// 使用读写锁保护所有对 Config 内部数据的并发访问
+	lock sync.RWMutex
 }
 
 var globalConfig *Config
 var once sync.Once
 
+// GetConfig 依然使用单例模式，确保全局只有一个 Config 实例
 func GetConfig() *Config {
 	once.Do(func() {
 		globalConfig = &Config{}
-		if err := globalConfig.load(); err != nil {
+		if err := globalConfig.loadFromDisk(); err != nil {
 			Print("[!] FATAL: Could not load or create config file: %v", err)
 			os.Exit(1)
 		}
 	})
 	return globalConfig
 }
-func (c *Config) load() error {
+
+// loadFromDisk 只在程序启动时调用一次，从硬盘加载初始快照
+func (c *Config) loadFromDisk() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+	// 设置默认值
 	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 32768, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
 	c.Accounts = map[string]string{"admin": "admin"}
 	c.DeviceIDs = make(map[string]DeviceInfo)
+	
 	data, err := ioutil.ReadFile(ConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			Print("[*] %s not found, creating with default structure.", ConfigFile)
-			return c.save()
+			// 这里调用 saveToDisk 将默认配置写入文件
+			return c.saveToDisk()
 		}
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -155,29 +164,24 @@ func (c *Config) load() error {
 	}
 	return nil
 }
-func (c *Config) save() error {
+
+// saveToDisk 是一个内部方法，负责将内存中的当前状态写入硬盘
+func (c *Config) saveToDisk() error {
+	// 注意：这个方法本身不加锁，调用它的地方需要负责加锁
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil { return fmt.Errorf("failed to marshal config: %w", err) }
 	return ioutil.WriteFile(ConfigFile, data, 0644)
 }
-func (c *Config) SafeSave() error { c.lock.Lock(); defer c.lock.Unlock(); return c.save() }
-func (c *Config) GetSettings() Settings { c.lock.RLock(); defer c.lock.RUnlock(); return c.Settings }
-func (c *Config) GetAccounts() map[string]string {
-	c.lock.RLock()
+
+// SafeSave 将内存中的快照安全地写入硬盘（由定时器调用）
+func (c *Config) SafeSave() {
+	c.lock.RLock() // 使用读锁，因为它只是读取内存状态并写入文件
 	defer c.lock.RUnlock()
-	accts := make(map[string]string)
-	for k, v := range c.Accounts { accts[k] = v }
-	return accts
-}
-func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-	devices := make(map[string]DeviceInfo)
-	for k, v := range c.DeviceIDs {
-		if v.MaxSessions < 1 { v.MaxSessions = 1 }
-		devices[k] = v
+	if err := c.saveToDisk(); err != nil {
+		Print("[!] Failed to save config to disk: %v", err)
+	} else {
+		Print("[*] Config snapshot successfully saved to disk.")
 	}
-	return devices
 }
 
 func hashPassword(password string) (string, error) {
@@ -230,8 +234,9 @@ var (
 
 func InitMetrics() {
 	cfg := GetConfig()
-	devices := cfg.GetDeviceIDs()
-	for id, info := range devices {
+	cfg.lock.RLock()
+	defer cfg.lock.RUnlock()
+	for id, info := range cfg.DeviceIDs {
 		initialUsage := info.UsedBytes
 		deviceUsage.Store(id, &initialUsage)
 	}
@@ -245,121 +250,120 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// ==============================================================================
-// === 终极修复：重写 auditActiveConnections 函数，保证逻辑清晰无误 ===
-// ==============================================================================
-func auditActiveConnections() {
-	Print("[审计] === 开始新一轮连接审计 ===")
+// --- 后台周期性任务 ---
 
+// auditActiveConnections 现在可以安全地、高性能地读取内存快照
+func auditActiveConnections() {
 	cfg := GetConfig()
-	settings := cfg.GetSettings()
-	devices := cfg.GetDeviceIDs() // 获取最新的规则快照
 
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
 		
-		Print("[审计] 正在检查: IP=%s, Device=%s, Credential=%s", connInfo.IP, connInfo.DeviceID, connInfo.Credential)
-
-		// 规则 1: 检查IP黑名单
+		cfg.lock.RLock() // 加读锁以安全地读取配置
+		
+		settings := cfg.Settings
+		// 检查IP黑名单
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
-			Print("[审计] -> 触发踢出: IP被列入黑名单。")
+			cfg.lock.RUnlock()
+			Print("[审计] 触发踢出: IP %s 被列入黑名单。", connInfo.IP)
 			connInfo.Writer.Close()
-			return true // 继续检查下一个
+			return true 
 		}
 
-		// 规则 2: 如果设备认证被全局关闭，则跳过所有后续设备相关的检查
 		if !settings.EnableDeviceIDAuth {
-			Print("[审计] -> 跳过: 设备ID认证已全局关闭。")
+			cfg.lock.RUnlock()
 			return true
 		}
 
-		// 规则 3: 连接必须有关联的凭证，否则为非法连接
 		if connInfo.Credential == "" {
-			Print("[审计] -> 触发踢出: 连接无凭证，但设备认证已开启。")
+			cfg.lock.RUnlock()
+			Print("[审计] 触发踢出: 连接无凭证，但设备认证已开启。IP: %s", connInfo.IP)
 			connInfo.Writer.Close()
 			return true
 		}
 
-		// 规则 4: 凭证必须在当前设备列表中存在
-		devInfo, ok := devices[connInfo.Credential]
+		devInfo, ok := cfg.DeviceIDs[connInfo.Credential]
+		cfg.lock.RUnlock() // *** 尽快释放锁 ***
+
 		if !ok {
-			Print("[审计] -> 触发踢出: 设备凭证 '%s' 不再存在 (可能已被删除)。", connInfo.Credential)
+			Print("[审计] 触发踢出: 设备凭证 '%s' 不再存在。", connInfo.Credential)
 			connInfo.Writer.Close()
 			return true
 		}
 
-		// 规则 5: 设备必须是“启用”状态 (ID黑名单检查)
 		if !devInfo.Enabled {
-			Print("[审计] -> 触发踢出: 设备 '%s' 已被禁用。", connInfo.DeviceID)
+			Print("[审计] 触发踢出: 设备 '%s' 已被禁用。", connInfo.DeviceID)
 			connInfo.Writer.Close()
 			return true
 		}
 
-		// 规则 6: 检查设备是否过期
 		expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
 		if err == nil {
 			if time.Now().After(expiry.Add(24 * time.Hour)) {
-				Print("[审计] -> 触发踢出: 设备 '%s' 已于 '%s' 过期。", connInfo.DeviceID, devInfo.Expiry)
+				Print("[审计] 触发踢出: 设备 '%s' 已于 '%s' 过期。", connInfo.DeviceID, devInfo.Expiry)
 				connInfo.Writer.Close()
 				return true
 			}
-		} else {
-			Print("[审计] -> 警告: 无法解析设备 '%s' 的有效期 '%s': %v", connInfo.DeviceID, devInfo.Expiry, err)
 		}
 		
-		// 规则 7: 检查流量是否超限
 		if devInfo.LimitGB > 0 {
 			if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
 				currentUsage := atomic.LoadInt64(usageVal.(*int64))
 				limitBytes := int64(devInfo.LimitGB) * 1024 * 1024 * 1024
 				if currentUsage >= limitBytes {
-					Print("[审计] -> 触发踢出: 设备 '%s' 流量超限 (已用: %s, 上限: %s)。", connInfo.DeviceID, formatBytes(currentUsage), formatBytes(limitBytes))
+					Print("[审计] 触发踢出: 设备 '%s' 流量超限。", connInfo.DeviceID)
 					connInfo.Writer.Close()
 					return true
 				}
 			}
 		}
 
-		Print("[审计] -> 检查通过: 连接合规。")
-		return true // 所有检查通过，继续检查下一个
+		return true
 	})
 }
 
 
+// runPeriodicTasks 新增了定期保存配置到硬盘的任务
 func runPeriodicTasks() {
-	saveTicker := time.NewTicker(5 * time.Second)
+	cfg := GetConfig()
+
+	// 任务1: 每5秒将内存中的流量使用情况同步回 Config 对象
+	trafficSyncTicker := time.NewTicker(5 * time.Second)
 	go func() {
-		for range saveTicker.C { saveDeviceUsage() }
+		for range trafficSyncTicker.C {
+			cfg.lock.Lock()
+			deviceUsage.Range(func(key, value interface{}) bool {
+				id := key.(string)
+				currentUsage := atomic.LoadInt64(value.(*int64))
+				if info, ok := cfg.DeviceIDs[id]; ok {
+					info.UsedBytes = currentUsage
+					cfg.DeviceIDs[id] = info
+				}
+				return true
+			})
+			cfg.lock.Unlock()
+		}
 	}()
+
+	// 任务2: 每10秒将内存中的完整配置快照写入硬盘
+	diskSaveTicker := time.NewTicker(10 * time.Second)
+	go func() {
+		for range diskSaveTicker.C {
+			cfg.SafeSave()
+		}
+	}()
+
+	// 任务3: 收集服务器状态
 	statusTicker := time.NewTicker(2 * time.Second)
 	go func() {
 		for range statusTicker.C { collectSystemStatus() }
 	}()
+
+	// 任务4: 执行连接审计
 	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C { auditActiveConnections() }
 	}()
-}
-func saveDeviceUsage() {
-	cfg := GetConfig()
-	cfg.lock.Lock()
-	defer cfg.lock.Unlock()
-	isDirty := false
-	deviceUsage.Range(func(key, value interface{}) bool {
-		id := key.(string)
-		currentUsage := value.(*int64)
-		if info, ok := cfg.DeviceIDs[id]; ok {
-			if info.UsedBytes != atomic.LoadInt64(currentUsage) {
-				info.UsedBytes = atomic.LoadInt64(currentUsage)
-				cfg.DeviceIDs[id] = info
-				isDirty = true
-			}
-		}
-		return true
-	})
-	if isDirty {
-		if err := cfg.save(); err != nil { Print("[!] Failed to save device usage: %v", err) }
-	}
 }
 func collectSystemStatus() {
 	systemStatusMutex.Lock()
@@ -377,7 +381,7 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
 
-// Reader/Writer 包装器，实现双端心跳更新
+// ... Reader/Writer 包装器和 pipeTraffic (保持高性能版本不变) ...
 type writeTracker struct {
 	io.Writer
 	connInfo   *ActiveConnInfo
@@ -414,8 +418,6 @@ func (rt *readTracker) Read(p []byte) (n int, err error) {
 	}
 	return
 }
-
-// pipeTraffic 使用包装器恢复 io.Copy 的高性能，同时实现双端心跳
 func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
 	defer cancel()
@@ -453,7 +455,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	}()
 
 	cfg := GetConfig()
-	settings := cfg.GetSettings()
+	settings := cfg.GetSettings() // 获取一次 Settings 快照，减少后续锁的粒度
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
 
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
@@ -796,7 +798,14 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }
 			return conns[i].FirstConnection.Before(conns[j].FirstConnection)
 		})
-		devices := cfg.GetDeviceIDs()
+		
+		cfg.lock.RLock()
+		devices := make(map[string]DeviceInfo)
+		for k, v := range cfg.DeviceIDs {
+			devices[k] = v
+		}
+		cfg.lock.RUnlock()
+
 		resp := []APIConnectionResponse{}
 		now := time.Now()
 		for _, c := range conns {
@@ -851,19 +860,27 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		defer systemStatusMutex.RUnlock()
 		sendJSON(w, http.StatusOK, systemStatus)
 	case "/api/devices":
-		sendJSON(w, http.StatusOK, cfg.GetDeviceIDs())
+		cfg.lock.RLock()
+		devices := make(map[string]DeviceInfo)
+		for k, v := range cfg.DeviceIDs {
+			devices[k] = v
+		}
+		cfg.lock.RUnlock()
+		sendJSON(w, http.StatusOK, devices)
 	case "/api/settings":
-		sendJSON(w, http.StatusOK, cfg.GetSettings())
+		cfg.lock.RLock()
+		settings := cfg.Settings
+		cfg.lock.RUnlock()
+		sendJSON(w, http.StatusOK, settings)
 	case "/api/settings/toggle_device_auth":
 		enable, _ := reqData["enable"].(bool)
 		cfg.lock.Lock()
 		cfg.Settings.EnableDeviceIDAuth = enable
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else {
-			statusText := "开启"
-			if !enable { statusText = "关闭" }
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
-		}
+		// 不需要立刻保存，等待定时器
+		statusText := "开启"
+		if !enable { statusText = "关闭" }
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
 	case "/api/ssh/create", "/api/ssh/delete":
 		action := filepath.Base(r.URL.Path)
 		username, _ := reqData["username"].(string)
@@ -876,6 +893,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
+// handleAdminPost 现在只修改内存中的 Config 快照
 func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -898,17 +916,19 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		var ms int
 		if val, ok := maxSessionsRaw.(float64); ok { ms = int(val) } else { ms = 1 }
 		if ms < 1 { ms = 1 }
+		
 		cfg.lock.Lock()
 		cfg.DeviceIDs[secWSKey] = DeviceInfo{FriendlyName: friendlyName, Expiry: exp, LimitGB: limit, UsedBytes: 0, MaxSessions: ms, Enabled: true}
 		cfg.lock.Unlock()
+		
 		newUsage := int64(0)
 		deviceUsage.Store(secWSKey, &newUsage)
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"}) }
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
 	case "/device/set_status":
 		secWSKey, ok1 := reqData["sec_ws_key"].(string)
 		enabled, ok2 := reqData["enabled"].(bool)
 		if !ok1 || !ok2 {
-			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求，需要 sec_ws_key 和 enabled 状态"})
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求"})
 			return
 		}
 		cfg.lock.Lock()
@@ -916,11 +936,9 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			info.Enabled = enabled
 			cfg.DeviceIDs[secWSKey] = info
 			cfg.lock.Unlock()
-			if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()}) } else {
-				statusText := "启用"
-				if !enabled { statusText = "禁用" }
-				sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
-			}
+			statusText := "启用"
+			if !enabled { statusText = "禁用" }
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
 		} else {
 			cfg.lock.Unlock()
 			sendJSON(w, http.StatusNotFound, map[string]string{"status": "error", "message": "设备未找到"})
@@ -931,7 +949,7 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		delete(cfg.DeviceIDs, secWSKey)
 		cfg.lock.Unlock()
 		deviceUsage.Delete(secWSKey)
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"}) }
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"})
 	case "/device/reset_traffic":
 		secWSKey, _ := reqData["sec_ws_key"].(string)
 		if val, ok := deviceUsage.Load(secWSKey); ok { atomic.StoreInt64(val.(*int64), 0) }
@@ -941,7 +959,7 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			cfg.DeviceIDs[secWSKey] = info
 		}
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"})
 	case "/account/update":
 		ou, _ := reqData["old_user"].(string)
 		op, _ := reqData["old_pass"].(string)
@@ -973,20 +991,20 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		if ou != nu { delete(cfg.Accounts, ou) }
 		cfg.Accounts[nu] = h
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
 	case "/settings/save":
-		oldSettings := cfg.GetSettings()
-		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
+		cfg.lock.RLock()
+		oldPorts := []int{cfg.Settings.HTTPPort, cfg.Settings.TLSPort, cfg.Settings.StatusPort}
+		cfg.lock.RUnlock()
+		
 		var newSettings Settings
 		settingsBytes, _ := json.Marshal(reqData)
 		_ = json.Unmarshal(settingsBytes, &newSettings)
+		
 		cfg.lock.Lock()
 		cfg.Settings = newSettings
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil {
-			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
-			return
-		}
+		
 		newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}
 		portsChanged := false
 		for i := range oldPorts {
@@ -999,6 +1017,7 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
 			go func() {
 				time.Sleep(1 * time.Second)
+				cfg.SafeSave() // 重启前强制保存一次
 				Print("[*] Port settings changed. Restarting server...")
 				executable, _ := os.Executable()
 				cmd := exec.Command(executable, os.Args[1:]...)
@@ -1010,8 +1029,8 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 				os.Exit(0)
 			}()
 		} else {
-			Print("[*] Settings updated and hot-reloaded successfully.")
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
+			Print("[*] Settings updated in memory.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已在内存中更新，将在10秒内自动保存到硬盘。"})
 		}
 	}
 }
