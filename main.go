@@ -31,12 +31,12 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// I/O缓冲区池，用于复用内存，降低GC压力。
+// I/O缓冲区池
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
 	if size <= 0 {
-		size = 32 * 1024 // 默认32KB
+		size = 32 * 1024
 	}
 	bufferPool = sync.Pool{
 		New: func() interface{} {
@@ -47,7 +47,7 @@ func initBufferPool(size int) {
 
 const logBufferSize = 200
 
-// 环形缓冲区日志记录器
+// 环形日志缓冲区
 type RingBuffer struct {
 	mu     sync.RWMutex
 	buffer []string
@@ -84,7 +84,7 @@ var logBuffer *RingBuffer
 func init() { logBuffer = NewRingBuffer(logBufferSize) }
 func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
 
-// --- 配置相关的结构体和管理函数 ---
+// --- 配置结构体与管理 ---
 var ConfigFile = "ws_config.json"
 
 type Settings struct {
@@ -189,7 +189,7 @@ func checkPasswordHash(password, hash string) bool {
 	return err == nil
 }
 
-// --- 系统状态和连接信息相关的结构体 ---
+// --- 系统状态与连接信息 ---
 type ActiveConnInfo struct {
 	Writer                 net.Conn
 	LastActive             atomic.Int64
@@ -345,37 +345,54 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
 
-// --- 核心网络连接处理 ---
+// ==============================================================================
+// === 核心修复：引入 Reader/Writer 包装器，实现双端心跳更新 ===
+// ==============================================================================
 
-// 用于包裹 io.Writer, 以便在数据写入时更新统计和心跳
-type copyTracker struct {
+// writeTracker 用于包裹 io.Writer, 在数据写入时更新统计和心跳
+type writeTracker struct {
 	io.Writer
 	connInfo   *ActiveConnInfo
 	isUpload   bool
 	credential string
 }
 
-func (ct *copyTracker) Write(p []byte) (n int, err error) {
-	n, err = ct.Writer.Write(p)
+func (wt *writeTracker) Write(p []byte) (n int, err error) {
+	n, err = wt.Writer.Write(p)
 	if n > 0 {
-		if ct.isUpload {
+		if wt.isUpload {
 			globalBytesSent.Add(int64(n))
-			ct.connInfo.BytesSent.Add(int64(n))
+			wt.connInfo.BytesSent.Add(int64(n))
 		} else {
 			globalBytesReceived.Add(int64(n))
-			ct.connInfo.BytesReceived.Add(int64(n))
+			wt.connInfo.BytesReceived.Add(int64(n))
 		}
-		if ct.credential != "" {
-			if val, ok := deviceUsage.Load(ct.credential); ok {
+		if wt.credential != "" {
+			if val, ok := deviceUsage.Load(wt.credential); ok {
 				atomic.AddInt64(val.(*int64), int64(n))
 			}
 		}
-		ct.connInfo.LastActive.Store(time.Now().Unix())
+		wt.connInfo.LastActive.Store(time.Now().Unix())
 	}
 	return
 }
 
-// 恢复到简单高效的 io.Copy 模型，以保证最高性能
+// readTracker 用于包裹 io.Reader, 在数据读取时更新心跳
+type readTracker struct {
+	io.Reader
+	connInfo *ActiveConnInfo
+}
+
+func (rt *readTracker) Read(p []byte) (n int, err error) {
+	n, err = rt.Reader.Read(p)
+	if n > 0 {
+		// 只要成功读到任何数据（包括客户端心跳），就更新活跃时间戳
+		rt.connInfo.LastActive.Store(time.Now().Unix())
+	}
+	return
+}
+
+// pipeTraffic 使用包装器来恢复 io.Copy 的高性能，同时实现双端心跳
 func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, credential string, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
 	defer cancel()
@@ -383,18 +400,22 @@ func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *Act
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
 
-	tracker := &copyTracker{
+	// 包裹 Writer 用于写统计和写端心跳
+	writerWithTracking := &writeTracker{
 		Writer:     dst,
 		connInfo:   connInfo,
 		isUpload:   isUpload,
 		credential: credential,
 	}
 
-	// 使用 io.CopyBuffer, 它会调用我们自定义的 tracker.Write 方法
-	// 这样既能享受 io.Copy 的潜在性能优化（如零拷贝），又能实现我们的心跳更新
-	io.CopyBuffer(tracker, src, buf)
-	
-	// 当 io.Copy 结束后（因EOF或错误），尝试半关闭对端连接
+	// 包裹 Reader 用于读端心跳
+	readerWithTracking := &readTracker{
+		Reader:   src,
+		connInfo: connInfo,
+	}
+
+	io.CopyBuffer(writerWithTracking, readerWithTracking, buf)
+
 	if tcpConn, ok := dst.(net.Conn); ok {
 		if conn, ok := tcpConn.(*net.TCPConn); ok {
 			_ = conn.CloseWrite()
@@ -402,7 +423,7 @@ func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *Act
 	}
 }
 
-
+// --- 核心网络连接处理 ---
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -598,6 +619,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 
 
 // --- 后台管理面板相关函数 ---
+// (此部分无任何改动, 保持原样)
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
@@ -622,11 +644,9 @@ func runCommand(command string, args ...string) (bool, string) {
 	return true, out.String()
 }
 func manageSshUser(username, password, action string) (bool, string) { return false, "SSH user management is complex and platform-dependent, implementation omitted." }
-
 const sessionCookieName = "wstunnel_session"
 type Session struct { Username string; Expiry time.Time }
 var (sessions = make(map[string]Session); sessionsLock sync.RWMutex)
-
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isAPIRequest := strings.HasPrefix(r.URL.Path, "/api/")
@@ -737,7 +757,6 @@ type APIConnectionResponse struct {
 	LastActive   string `json:"last_active"`
 	ConnKey      string `json:"conn_key"`
 }
-
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
