@@ -107,23 +107,19 @@ type Settings struct {
 	EnableIPBlacklist            bool     `json:"enable_ip_blacklist"`
 	EnableDeviceIDAuth           bool     `json:"enable_device_id_auth"`
 }
-// DeviceInfo 的指针版本，确保我们总是操作同一个对象
 type DeviceInfo struct {
 	FriendlyName string `json:"friendly_name"`
 	Expiry       string `json:"expiry"`
 	LimitGB      int    `json:"limit_gb"`
-	UsedBytes    int64  `json:"used_bytes"` // 保存到磁盘时用
+	UsedBytes    int64  `json:"used_bytes"`
 	MaxSessions  int    `json:"max_sessions"`
 	Enabled      bool   `json:"enabled"`
-	
-	// 用于在内存中进行高性能、并发安全的流量统计
-	// json:"-" 表示这个字段不需要被序列化到 JSON 文件中
 	UsedBytesAtomic atomic.Int64 `json:"-"`
 }
 type Config struct {
 	Settings  Settings                `json:"settings"`
 	Accounts  map[string]string       `json:"accounts"`
-	DeviceIDs map[string]*DeviceInfo `json:"device_ids"` // *** 核心改动：使用指针 ***
+	DeviceIDs map[string]*DeviceInfo `json:"device_ids"`
 	lock      sync.RWMutex
 }
 
@@ -156,14 +152,12 @@ func (c *Config) loadFromDisk() error {
 	if err := json.Unmarshal(data, c); err != nil {
 		return fmt.Errorf("could not decode config file: %w. Please check its format", err)
 	}
-	// *** 核心改动：加载后，将磁盘数据同步到内存原子变量中 ***
 	for _, deviceInfo := range c.DeviceIDs {
 		deviceInfo.UsedBytesAtomic.Store(deviceInfo.UsedBytes)
 	}
 	return nil
 }
 func (c *Config) saveToDisk() error {
-	// *** 核心改动：保存前，将内存原子变量的数据同步回要写入磁盘的字段 ***
 	for _, deviceInfo := range c.DeviceIDs {
 		deviceInfo.UsedBytes = deviceInfo.UsedBytesAtomic.Load()
 	}
@@ -185,7 +179,6 @@ func checkPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
 }
-
 type ActiveConnInfo struct {
 	Writer                 net.Conn
 	LastActive             atomic.Int64
@@ -229,8 +222,6 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	}
 	return nil, false
 }
-
-// --- 后台周期性任务 ---
 func auditActiveConnections() {
 	cfg := GetConfig()
 	activeConns.Range(func(key, value interface{}) bool {
@@ -240,7 +231,7 @@ func auditActiveConnections() {
 		settings := cfg.Settings
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			cfg.lock.RUnlock()
-			Print("[审计] 踢出: IP %s 在黑名单中", connInfo.IP)
+			Print("[审计] 触发踢出: IP %s 在黑名单中", connInfo.IP)
 			connInfo.Writer.Close()
 			return true 
 		}
@@ -250,7 +241,7 @@ func auditActiveConnections() {
 		}
 		if connInfo.Credential == "" {
 			cfg.lock.RUnlock()
-			Print("[审计] 踢出: 连接无凭证 (IP: %s)", connInfo.IP)
+			Print("[审计] 触发踢出: 连接无凭证 (IP: %s)", connInfo.IP)
 			connInfo.Writer.Close()
 			return true
 		}
@@ -258,19 +249,19 @@ func auditActiveConnections() {
 		cfg.lock.RUnlock()
 
 		if !ok {
-			Print("[审计] 踢出: 设备 %s 已被删除", connInfo.DeviceID)
+			Print("[审计] 触发踢出: 设备 %s 已被删除", connInfo.DeviceID)
 			connInfo.Writer.Close()
 			return true
 		}
 		if !deviceInfo.Enabled {
-			Print("[审计] 踢出: 设备 %s 已被禁用", connInfo.DeviceID)
+			Print("[审计] 触发踢出: 设备 %s 已被禁用", connInfo.DeviceID)
 			connInfo.Writer.Close()
 			return true
 		}
 		expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 		if err == nil {
 			if time.Now().After(expiry.Add(24 * time.Hour)) {
-				Print("[审计] 踢出: 设备 %s 已过期", connInfo.DeviceID)
+				Print("[审计] 触发踢出: 设备 %s 已过期", connInfo.DeviceID)
 				connInfo.Writer.Close()
 				return true
 			}
@@ -279,7 +270,7 @@ func auditActiveConnections() {
 			currentUsage := deviceInfo.UsedBytesAtomic.Load()
 			limitBytes := int64(deviceInfo.LimitGB) * 1024 * 1024 * 1024
 			if currentUsage >= limitBytes {
-				Print("[审计] 踢出: 设备 %s 流量超限", connInfo.DeviceID)
+				Print("[审计] 触发踢出: 设备 %s 流量超限", connInfo.DeviceID)
 				connInfo.Writer.Close()
 				return true
 			}
@@ -287,12 +278,10 @@ func auditActiveConnections() {
 		return true
 	})
 }
-// runPeriodicTasks 回归简单，不再需要复杂的同步任务
 func runPeriodicTasks() {
-	// 定期保存配置到硬盘
-	diskSaveTicker := time.NewTicker(30 * time.Second) // 周期可以长一些
+	cfg := GetConfig()
+	diskSaveTicker := time.NewTicker(30 * time.Second)
 	go func() {
-		cfg := GetConfig()
 		for range diskSaveTicker.C {
 			cfg.lock.Lock()
 			if err := cfg.saveToDisk(); err != nil {
@@ -301,12 +290,10 @@ func runPeriodicTasks() {
 			cfg.lock.Unlock()
 		}
 	}()
-	// 收集服务器状态
 	statusTicker := time.NewTicker(2 * time.Second)
 	go func() {
 		for range statusTicker.C { collectSystemStatus() }
 	}()
-	// 执行连接审计
 	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C { auditActiveConnections() }
@@ -327,11 +314,10 @@ func collectSystemStatus() {
 	systemStatus.BytesSent = globalBytesSent.Load()
 	systemStatus.BytesReceived = globalBytesReceived.Load()
 }
-
 type writeTracker struct {
 	io.Writer
 	connInfo   *ActiveConnInfo
-	deviceInfo *DeviceInfo // *** 直接持有 DeviceInfo 的指针 ***
+	deviceInfo *DeviceInfo
 	isUpload   bool
 }
 func (wt *writeTracker) Write(p []byte) (n int, err error) {
@@ -344,7 +330,6 @@ func (wt *writeTracker) Write(p []byte) (n int, err error) {
 			globalBytesReceived.Add(int64(n))
 			wt.connInfo.BytesReceived.Add(int64(n))
 		}
-		// *** 直接通过指针，原子地更新流量 ***
 		if wt.deviceInfo != nil {
 			wt.deviceInfo.UsedBytesAtomic.Add(int64(n))
 		}
@@ -352,31 +337,39 @@ func (wt *writeTracker) Write(p []byte) (n int, err error) {
 	}
 	return
 }
+type readTracker struct {
+	io.Reader
+	connInfo *ActiveConnInfo
+}
+func (rt *readTracker) Read(p []byte) (n int, err error) {
+	n, err = rt.Reader.Read(p)
+	if n > 0 {
+		rt.connInfo.LastActive.Store(time.Now().Unix())
+	}
+	return
+}
 func pipeTraffic(wg *sync.WaitGroup, dst io.Writer, src io.Reader, connInfo *ActiveConnInfo, deviceInfo *DeviceInfo, isUpload bool, cancel context.CancelFunc) {
 	defer wg.Done()
 	defer cancel()
-
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
-
 	writerWithTracking := &writeTracker{
 		Writer:     dst,
 		connInfo:   connInfo,
 		deviceInfo: deviceInfo,
 		isUpload:   isUpload,
 	}
-	
-	// 这里不再需要 readTracker，因为心跳只依赖数据流动
-	io.CopyBuffer(writerWithTracking, src, buf)
-	
+	readerWithTracking := &readTracker{
+		Reader:   src,
+		connInfo: connInfo,
+	}
+	io.CopyBuffer(writerWithTracking, readerWithTracking, buf)
 	if tcpConn, ok := dst.(net.Conn); ok {
 		if conn, ok := tcpConn.(*net.TCPConn); ok {
 			_ = conn.CloseWrite()
 		}
 	}
 }
-
-
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -423,7 +416,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var headersText string
 	var finalDeviceID string
 	var credential string
-	var deviceInfo *DeviceInfo // *** 使用指针 ***
+	var deviceInfo *DeviceInfo
 
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Duration(settings.Timeout) * time.Second))
@@ -438,9 +431,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
 		body, _ := ioutil.ReadAll(req.Body)
 		initialData = body
-
 		credential = req.Header.Get("Sec-WebSocket-Key")
-		
 		var found bool
 		if credential != "" {
 			cfg.lock.RLock()
@@ -478,12 +469,10 @@ func handleClient(conn net.Conn, isTLS bool) {
 				finalDeviceID = remoteIP
 			}
 		}
-
 		connInfo.DeviceID = finalDeviceID
 		connInfo.Credential = credential
-		
 		ua := req.UserAgent()
-		if settings.UAKeywordProbe != "" && strings.Contains(ua, ua.UAKeywordProbe) {
+		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
 			Print("[*] Received probe from %s for device '%s'. Awaiting WS handshake.", remoteIP, finalDeviceID)
 			_, _ = conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 			continue
@@ -522,7 +511,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		tcpTargetConn.SetKeepAlive(true)
 		tcpTargetConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-
 	if len(initialData) > 0 {
 		_, err := targetConn.Write(initialData)
 		if err != nil {
@@ -530,15 +518,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 			return
 		}
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	
 	idleTimeout := time.Duration(settings.Timeout) * time.Second
 	if idleTimeout < 90*time.Second {
 		idleTimeout = 90 * time.Second
 	}
-	
 	go func(innerCtx context.Context) {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -557,18 +542,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 			}
 		}
 	}(ctx)
-
 	var wg sync.WaitGroup
 	wg.Add(2)
-	
 	go pipeTraffic(&wg, targetConn, conn, connInfo, deviceInfo, true, cancel)
 	go pipeTraffic(&wg, conn, targetConn, connInfo, deviceInfo, false, cancel)
-	
 	wg.Wait()
 }
-
-
-// --- 后台管理面板相关函数 ---
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
@@ -727,7 +706,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		})
 		
 		cfg.lock.RLock()
-		// 创建一个用于展示的快照，避免长时间锁
 		devices := make(map[string]*DeviceInfo)
 		for k, v := range cfg.DeviceIDs {
 			devices[k] = v
@@ -810,6 +788,11 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		enable, _ := reqData["enable"].(bool)
 		cfg.lock.Lock()
 		cfg.Settings.EnableDeviceIDAuth = enable
+		if err := cfg.saveToDisk(); err != nil {
+			cfg.lock.Unlock()
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
 		cfg.lock.Unlock()
 		statusText := "开启"
 		if !enable { statusText = "关闭" }
@@ -826,7 +809,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
-// handleAdminPost 修改内存并立即写入硬盘
 func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
