@@ -1,5 +1,5 @@
 package main
-// 10-16-19：50 重构
+
 import (
 	"bufio"
 	"bytes"
@@ -624,51 +624,83 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
 
+	// Heartbeat Logic Fix
 	var heartbeatTicker *time.Ticker
-	if !isUpload {
+	var heartbeatChan <-chan time.Time // Declare a read-only channel. It's nil by default.
+	if !isUpload {                      // Only create ticker for the server->client (download) direction
 		heartbeatTicker = time.NewTicker(45 * time.Second)
+		heartbeatChan = heartbeatTicker.C // Assign the ticker's channel to it
 		defer heartbeatTicker.Stop()
 	}
+	// If isUpload is true, heartbeatChan remains nil, which is safe for the select statement.
 
 	for {
 		select {
 		case <-ctx.Done():
 			Print("[*] Conn %s (%s) pipeTraffic stopped by context.Done()", connKey, connInfo.IP)
 			return
-		case <-heartbeatTicker.C:
-			if !isUpload {
-				if err := writeWebSocketPing(tracker.Writer); err != nil {
-					Print("[!] Failed to send WebSocket Ping to %s: %v. Closing connection.", connInfo.IP, err)
-					connInfo.Writer.Close()
-					return
-				}
-				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
+
+		case <-heartbeatChan: // This is now safe. It only triggers when heartbeatChan is not nil.
+			if err := writeWebSocketPing(tracker.Writer); err != nil {
+				Print("[!] Failed to send WebSocket Ping to %s: %v. Closing connection.", connInfo.IP, err)
+				connInfo.Writer.Close() // Close the main client connection
+				return
 			}
+			// Sending a ping is a form of activity.
+			atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
+
 		default:
+			// Read Timeout Logic
+			// We set a deadline on the source connection to unblock the io.CopyBuffer call periodically.
+			// This allows the select statement to check for ctx.Done() or heartbeats.
 			settings := GetConfig().GetSettings()
 			readTimeout := time.Duration(settings.Timeout) * time.Second
+
+			// In the download direction, the source is the target connection.
+			// Let's use a shorter timeout to allow heartbeats to be sent promptly.
 			if !isUpload {
-				if tcpSrc, ok := src.(net.Conn); ok {
-					_ = tcpSrc.SetReadDeadline(time.Now().Add(readTimeout))
-				}
-			} else {
-				if tcpSrc, ok := connInfo.Writer.(net.Conn); ok {
-					_ = tcpSrc.SetReadDeadline(time.Now().Add(readTimeout))
-				}
+				readTimeout = 50 * time.Second // Slightly longer than heartbeat interval
 			}
 
+			var sourceConn net.Conn
+			if conn, ok := src.(net.Conn); ok {
+				// This handles the download direction where src is targetConn.
+				sourceConn = conn
+			} else if _, ok := src.(*bufio.Reader); ok {
+				// This handles the upload direction where src is a bufio.Reader wrapping the client conn.
+				// The client conn is stored in connInfo.Writer.
+				sourceConn = connInfo.Writer
+			}
+
+			if sourceConn != nil {
+				_ = sourceConn.SetReadDeadline(time.Now().Add(readTimeout))
+			}
+
+			// Perform the data copy
 			n, err := io.CopyBuffer(tracker, src, buf)
 			if n > 0 {
+				// Data was transferred, so reset the idle timer.
 				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
 			}
+
 			if err != nil {
+				// If the error is a timeout, it's an expected condition to unblock the loop.
+				// We just continue to the next iteration of the select statement.
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				} else if err == io.EOF {
-					Print("[*] Conn %s (%s) %s pipeTraffic source EOF. Closing destination.", connKey, connInfo.IP, isUploadName(isUpload))
-				} else {
-					Print("[!] Conn %s (%s) %s pipeTraffic error: %v. Closing connection.", connKey, connInfo.IP, isUploadName(isUpload), err)
+					continue
 				}
-				connInfo.Writer.Close()
+
+				// If it's any other error (like EOF), the connection is considered closed.
+				if err == io.EOF {
+					Print("[*] Conn %s (%s) %s pipeTraffic source EOF.", connKey, connInfo.IP, isUploadName(isUpload))
+				} else {
+					if !strings.Contains(err.Error(), "use of closed network connection") {
+						Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
+					}
+				}
+				
+				connInfo.Writer.Close() // Close the main client connection
+				dst.Close()             // Close the other end of the pipe
 				return
 			}
 		}
@@ -1233,4 +1265,4 @@ func main() {
 		Print("[!] FATAL: Failed to start admin server on %s: %v", err)
 		os.Exit(1)
 	}
-}
+}```
