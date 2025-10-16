@@ -833,6 +833,9 @@ type APIConnectionResponse struct {
 	ConnKey      string `json:"conn_key"`
 }
 
+// ==========================================================
+// === 关键修改点 (Key Modification Point) ===
+// ==========================================================
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -947,6 +950,24 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
 		}
+
+	// +++ 新增的重启服务接口 +++
+	case "/api/server/restart":
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "服务正在重启..."})
+		go func() {
+			time.Sleep(1 * time.Second) // 留出时间让HTTP响应发送出去
+			Print("[*] Manual restart triggered from admin panel.")
+			executable, _ := os.Executable()
+			cmd := exec.Command(executable, os.Args[1:]...)
+			cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+			if err := cmd.Start(); err != nil {
+				Print("[!] FATAL: Failed to restart process after manual trigger: %v", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}()
+	// +++ 新增逻辑结束 +++
+
 	case "/api/ssh/create", "/api/ssh/delete":
 		action := filepath.Base(r.URL.Path)
 		username, _ := reqData["username"].(string)
