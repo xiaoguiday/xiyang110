@@ -31,14 +31,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ==============================================================================
-// === 优化 1: 引入 sync.Pool 来复用I/O缓冲区, 旨在提升速度 ===
-// ==============================================================================
+// ==========================================================
+// === 速度优化: 引入 sync.Pool 复用 I/O 缓冲区 ===
+// ==========================================================
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
 	if size <= 0 {
-		size = 32 * 1024 // 默认32KB
+		size = 32 * 1024 // 默认 32KB
 	}
 	bufferPool = sync.Pool{
 		New: func() interface{} {
@@ -46,7 +46,6 @@ func initBufferPool(size int) {
 		},
 	}
 }
-
 
 const logBufferSize = 200
 
@@ -270,20 +269,17 @@ func auditActiveConnections() {
 
 		if connInfo.Credential != "" {
 			if devInfo, ok := devices[connInfo.Credential]; ok {
-				
 				if !devInfo.Enabled {
 					Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 					connInfo.Writer.Close()
 					return true
 				}
-
 				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
 				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
 					Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 					connInfo.Writer.Close()
 					return true
 				}
-
 				if devInfo.LimitGB > 0 {
 					if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
 						currentUsage := atomic.LoadInt64(usageVal.(*int64))
@@ -553,7 +549,7 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 }
 
 // ==============================================================================
-// === 优化 3: 修改 pipeTraffic 以使用 sync.Pool, 旨在提升速度 ===
+// === 速度优化: 修改 pipeTraffic 以使用 sync.Pool ===
 // ==============================================================================
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
 	defer wg.Done()
@@ -571,7 +567,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf) // 确保函数退出时归还缓冲区
 
-	// 直接使用最高效的 io.CopyBuffer
+	// 使用最高效的 io.CopyBuffer
 	io.CopyBuffer(tracker, src, buf)
 	
 	if tcpConn, ok := dst.(*net.TCPConn); ok {
@@ -986,9 +982,9 @@ func main() {
 	cfg := GetConfig()
 	InitMetrics()
 	settings := cfg.GetSettings()
-
+	
 	// ==============================================================================
-	// === 优化 2: 在 main 函数中初始化 buffer pool ===
+	// === 速度优化: 在 main 函数中初始化 buffer pool ===
 	// ==============================================================================
 	initBufferPool(settings.BufferSize)
 
@@ -1068,5 +1064,3 @@ func main() {
 		os.Exit(1)
 	}
 }
-
-这个版本代码 好像是我修改后的版本  但是 authMiddleware 还是有缺陷  (返回 HTML)   我使用的版本应该是这个
