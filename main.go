@@ -727,9 +727,7 @@ func runCommand(command string, args ...string) (bool, string) {
 	return true, out.String()
 }
 
-// ==========================================================
-// --- SSH User Management (Full Implementation) ---
-// ==========================================================
+// +++ 唯一修改点：替换为空白的 manageSshUser 函数 +++
 func manageSshUser(username, password, action string) (bool, string) {
 	if os.Geteuid() != 0 {
 		return false, "此操作需要 root 权限。"
@@ -899,7 +897,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := GetConfig()
-	storedPass, accountOk := cfg.GetAccounts()[creds.Username]
+	accounts := cfg.GetAccounts()
+	storedPass, accountOk := accounts[creds.Username]
 	if !accountOk {
 		sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"})
 		return
@@ -940,6 +939,346 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	w.WriteHeader(code)
 	_, _ = w.Write(response)
 }
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+type APIConnectionResponse struct {
+	DeviceID     string `json:"device_id"`
+	Status       string `json:"status"`
+	SentStr      string `json:"sent_str"`
+	RcvdStr      string `json:"rcvd_str"`
+	SpeedStr     string `json:"speed_str"`
+	RemainingStr string `json:"remaining_str"`
+	Expiry       string `json:"expiry"`
+	IP           string `json:"ip"`
+	FirstConn    string `json:"first_conn"`
+	LastActive   string `json:"last_active"`
+	ConnKey      string `json:"conn_key"`
+}
+
+func handleAPI(w http.ResponseWriter, r *http.Request) {
+	cfg := GetConfig()
+	var reqData map[string]interface{}
+	if r.Body != nil {
+		body, err := ioutil.ReadAll(r.Body)
+		if err == nil && len(body) > 0 {
+			_ = json.Unmarshal(body, &reqData)
+		}
+	}
+	switch r.URL.Path {
+	case "/api/connections":
+		var conns []*ActiveConnInfo
+		activeConns.Range(func(key, value interface{}) bool {
+			conns = append(conns, value.(*ActiveConnInfo))
+			return true
+		})
+		sort.Slice(conns, func(i, j int) bool {
+			statusOrder := map[string]int{"活跃": 0, "握手": 1}
+			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] {
+				return statusOrder[conns[i].Status] < statusOrder[conns[j].Status]
+			}
+			return conns[i].FirstConnection.Before(conns[j].FirstConnection)
+		})
+		devices := cfg.GetDeviceIDs()
+		resp := []APIConnectionResponse{}
+		now := time.Now()
+		for _, c := range conns {
+			bytesSent := atomic.LoadInt64(&c.BytesSent)
+			bytesReceived := atomic.LoadInt64(&c.BytesReceived)
+			if c.Status == "活跃" {
+				timeDelta := now.Sub(c.LastSpeedUpdateTime).Seconds()
+				if timeDelta >= 2 {
+					currentTotalBytes := bytesSent + bytesReceived
+					bytesDelta := currentTotalBytes - c.LastTotalBytesForSpeed
+					if timeDelta > 0 {
+						c.CurrentSpeedBps = float64(bytesDelta) / timeDelta
+					}
+					c.LastSpeedUpdateTime = now
+					c.LastTotalBytesForSpeed = currentTotalBytes
+				}
+			}
+			var deviceInfo DeviceInfo
+			var found bool
+			if c.Credential != "" {
+				deviceInfo, found = devices[c.Credential]
+			}
+			remainingStr := "无限制"
+			if found && deviceInfo.LimitGB > 0 {
+				var currentUsage int64
+				if val, ok := deviceUsage.Load(c.Credential); ok {
+					currentUsage = atomic.LoadInt64(val.(*int64))
+				}
+				remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - currentUsage
+				if remainingBytes < 0 {
+					remainingBytes = 0
+				}
+				remainingStr = formatBytes(remainingBytes)
+			}
+			lastActiveTimestamp := atomic.LoadInt64(&c.LastActive)
+			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
+			resp = append(resp, APIConnectionResponse{
+				DeviceID:     c.DeviceID,
+				Status:       c.Status,
+				SentStr:      formatBytes(bytesSent),
+				RcvdStr:      formatBytes(bytesReceived),
+				SpeedStr:     fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))),
+				RemainingStr: remainingStr,
+				Expiry:       deviceInfo.Expiry,
+				IP:           c.IP,
+				FirstConn:    c.FirstConnection.Format("15:04:05"),
+				LastActive:   lastActiveTime.Format("15:04:05"),
+				ConnKey:      c.ConnKey,
+			})
+		}
+		sendJSON(w, http.StatusOK, resp)
+	case "/api/kick":
+		connKey, _ := reqData["conn_key"].(string)
+		if conn, ok := GetActiveConn(connKey); ok {
+			_ = conn.Writer.Close()
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "连接已踢掉"})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "连接未找到"})
+		}
+	case "/api/device_usage":
+		usageMap := make(map[string]int64)
+		deviceUsage.Range(func(key, value interface{}) bool {
+			usageMap[key.(string)] = atomic.LoadInt64(value.(*int64))
+			return true
+		})
+		sendJSON(w, http.StatusOK, usageMap)
+	case "/api/logs":
+		sendJSON(w, http.StatusOK, logBuffer.GetLogs())
+	case "/api/server_status":
+		systemStatusMutex.RLock()
+		defer systemStatusMutex.RUnlock()
+		sendJSON(w, http.StatusOK, systemStatus)
+	case "/api/devices":
+		sendJSON(w, http.StatusOK, cfg.GetDeviceIDs())
+	case "/api/settings":
+		sendJSON(w, http.StatusOK, cfg.GetSettings())
+	case "/api/settings/toggle_device_auth":
+		enable, _ := reqData["enable"].(bool)
+		cfg.lock.Lock()
+		cfg.Settings.EnableDeviceIDAuth = enable
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			statusText := "开启"
+			if !enable {
+				statusText = "关闭"
+			}
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
+		}
+
+	case "/api/server/restart":
+		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "服务正在重启..."})
+		go func() {
+			time.Sleep(1 * time.Second)
+			Print("[*] Manual restart triggered from admin panel.")
+			executable, _ := os.Executable()
+			cmd := exec.Command(executable, os.Args[1:]...)
+			cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+			if err := cmd.Start(); err != nil {
+				Print("[!] FATAL: Failed to restart process after manual trigger: %v", err)
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}()
+
+	case "/api/ssh/create", "/api/ssh/delete":
+		action := filepath.Base(r.URL.Path)
+		username, _ := reqData["username"].(string)
+		password, _ := reqData["password"].(string)
+		success, message := manageSshUser(username, password, action)
+		status := "ok"
+		if !success {
+			status = "error"
+		}
+		sendJSON(w, http.StatusOK, map[string]string{"status": status, "message": message})
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func handleAdminPost(w http.ResponseWriter, r *http.Request) {
+	cfg := GetConfig()
+	var reqData map[string]interface{}
+	if json.NewDecoder(r.Body).Decode(&reqData) != nil {
+		sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的JSON格式"})
+		return
+	}
+	switch r.URL.Path {
+	case "/device/add":
+		friendlyName, _ := reqData["friendly_name"].(string)
+		secWSKey, _ := reqData["sec_ws_key"].(string)
+		exp, _ := reqData["expiry"].(string)
+		limitStr, _ := reqData["limit_gb"].(string)
+		maxSessionsRaw, _ := reqData["max_sessions"]
+		if friendlyName == "" || exp == "" || secWSKey == "" {
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "名称, 有效期, 和设备密钥不能为空"})
+			return
+		}
+		limit, _ := strconv.Atoi(limitStr)
+		var ms int
+		if val, ok := maxSessionsRaw.(float64); ok {
+			ms = int(val)
+		} else {
+			ms = 1
+		}
+		if ms < 1 {
+			ms = 1
+		}
+		cfg.lock.Lock()
+		cfg.DeviceIDs[secWSKey] = DeviceInfo{FriendlyName: friendlyName, Expiry: exp, LimitGB: limit, UsedBytes: 0, MaxSessions: ms, Enabled: true}
+		cfg.lock.Unlock()
+		newUsage := int64(0)
+		deviceUsage.Store(secWSKey, &newUsage)
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
+		}
+	case "/device/set_status":
+		secWSKey, ok1 := reqData["sec_ws_key"].(string)
+		enabled, ok2 := reqData["enabled"].(bool)
+		if !ok1 || !ok2 {
+			sendJSON(w, http.StatusBadRequest, map[string]string{"status": "error", "message": "无效的请求，需要 sec_ws_key 和 enabled 状态"})
+			return
+		}
+		cfg.lock.Lock()
+		if info, ok := cfg.DeviceIDs[secWSKey]; ok {
+			info.Enabled = enabled
+			cfg.DeviceIDs[secWSKey] = info
+			cfg.lock.Unlock()
+			if err := cfg.SafeSave(); err != nil {
+				sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()})
+			} else {
+				statusText := "启用"
+				if !enabled {
+					statusText = "禁用"
+				}
+				sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
+			}
+		} else {
+			cfg.lock.Unlock()
+			sendJSON(w, http.StatusNotFound, map[string]string{"status": "error", "message": "设备未找到"})
+		}
+	case "/device/delete":
+		secWSKey, _ := reqData["sec_ws_key"].(string)
+		cfg.lock.Lock()
+		delete(cfg.DeviceIDs, secWSKey)
+		cfg.lock.Unlock()
+		deviceUsage.Delete(secWSKey)
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"})
+		}
+	case "/device/reset_traffic":
+		secWSKey, _ := reqData["sec_ws_key"].(string)
+		if val, ok := deviceUsage.Load(secWSKey); ok {
+			atomic.StoreInt64(val.(*int64), 0)
+		}
+		cfg.lock.Lock()
+		if info, ok := cfg.DeviceIDs[secWSKey]; ok {
+			info.UsedBytes = 0
+			cfg.DeviceIDs[secWSKey] = info
+		}
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"})
+		}
+	case "/account/update":
+		ou, _ := reqData["old_user"].(string)
+		op, _ := reqData["old_pass"].(string)
+		nu, _ := reqData["new_user"].(string)
+		np, _ := reqData["new_pass"].(string)
+		accounts := cfg.GetAccounts()
+		storedPass, ok := accounts[ou]
+		if !ok {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"})
+			return
+		}
+		valid := false
+		if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") {
+			valid = checkPasswordHash(op, storedPass)
+		} else {
+			valid = (op == storedPass)
+		}
+		if !valid {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原密码错误"})
+			return
+		}
+		h, err := hashPassword(np)
+		if err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "密码加密失败"})
+			return
+		}
+		cfg.lock.Lock()
+		if ou != nu {
+			delete(cfg.Accounts, ou)
+		}
+		cfg.Accounts[nu] = h
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
+		}
+	case "/settings/save":
+		oldSettings := cfg.GetSettings()
+		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
+		var newSettings Settings
+		settingsBytes, _ := json.Marshal(reqData)
+		_ = json.Unmarshal(settingsBytes, &newSettings)
+		cfg.lock.Lock()
+		cfg.Settings = newSettings
+		cfg.lock.Unlock()
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
+			return
+		}
+		newPorts := []int{newSettings.HTTPPort, newSettings.TLSPort, newSettings.StatusPort}
+		portsChanged := false
+		for i := range oldPorts {
+			if oldPorts[i] != newPorts[i] {
+				portsChanged = true
+				break
+			}
+		}
+		if portsChanged {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
+			go func() {
+				time.Sleep(1 * time.Second)
+				Print("[*] Port settings changed. Restarting server...")
+				executable, _ := os.Executable()
+				cmd := exec.Command(executable, os.Args[1:]...)
+				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+				if err := cmd.Start(); err != nil {
+					Print("[!] FATAL: Failed to restart process: %v", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}()
+		} else {
+			Print("[*] Settings updated and hot-reloaded successfully.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
+		}
+	}
+}
 
 func main() {
 	go func() {
@@ -962,8 +1301,10 @@ func main() {
 	}
 	Print("[*] WSTunnel-Go starting...")
 	cfg := GetConfig()
+	initBufferPool(cfg.Settings.BufferSize)
 	InitMetrics()
 	settings := cfg.GetSettings()
+
 	runPeriodicTasks()
 
 	go func() {
@@ -1007,9 +1348,11 @@ func main() {
 					go handleClient(conn, true)
 				}
 			}()
+		} else {
+			Print("[!] TLS Key file '%s' not found. WSS server will not start.", settings.KeyFile)
 		}
 	} else {
-		Print("[!] Cert/Key file not found. WSS server will not start.")
+		Print("[!] TLS Cert file '%s' not found. WSS server will not start.", settings.CertFile)
 	}
 
 	adminMux := http.NewServeMux()
@@ -1038,7 +1381,7 @@ func main() {
 	adminAddr := fmt.Sprintf("0.0.0.0:%d", settings.StatusPort)
 	Print("[*] Status on http://127.0.0.1:%d", settings.StatusPort)
 	if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
-		Print("[!] FATAL: Failed to start admin server on %s: %v", err)
+		Print("[!] FATAL: Failed to start admin server on %s: %v", adminAddr, err)
 		os.Exit(1)
 	}
 }
