@@ -667,13 +667,12 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	}
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 
-	var heartbeatTicker *time.Ticker
-	if !isUpload && settings.HeartbeatInterval > 0 {
-		heartbeatTicker = time.NewTicker(time.Duration(settings.HeartbeatInterval) * time.Second)
-		defer heartbeatTicker.Stop()
+	var activityTicker *time.Ticker
+	if settings.HeartbeatInterval > 0 {
+		activityTicker = time.NewTicker(time.Duration(settings.HeartbeatInterval) * time.Second)
+		defer activityTicker.Stop()
 	}
 
-	// Channel to signal completion of the io.Copy operation
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -687,7 +686,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		select {
 		case <-ctx.Done():
 			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
-			// Ensure the other connection is closed to unblock io.Copy
 			if c, ok := src.(net.Conn); ok {
 				c.Close()
 			}
@@ -703,12 +701,14 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			}
 			return
 		case <-func() <-chan time.Time {
-			if heartbeatTicker != nil {
-				return heartbeatTicker.C
+			if activityTicker != nil {
+				return activityTicker.C
 			}
 			return nil
 		}():
-			if !isUpload {
+			if isUpload {
+				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
+			} else {
 				if err := writeWebSocketPing(tracker.Writer); err != nil {
 					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v.", connInfo.IP, connInfo.DeviceID, err)
 					return
