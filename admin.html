@@ -297,6 +297,10 @@
     }
 
     function renderAccountPage() { contentArea.innerHTML = `<div class="card"><h2>面板账号设置</h2><div class="form-row"><label style="flex-basis: 80px; text-align: left;">原账号:</label><input id="old_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">原密码:</label><input id="old_pass" type="password"></div><div class="form-row"><label style="flex-basis: 80px; text-align: left;">新账号:</label><input id="new_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">新密码:</label><input id="new_pass" type="password"><button class="btn secondary" onclick="updateAccount()">保存</button></div></div><div class="card"><h2>创建SSH隧道用户 (仅限本机登录)</h2><p style="font-size:13px;color:#64748b;">此功能会创建或更新一个系统用户，并修改 <b>/etc/ssh/sshd_config</b> 文件，以仅允许该用户从 127.0.0.1 (本机) 通过密码登录。主要用于 WSS payload 转发。请确保脚本以 root 权限运行。</p><div class="form-row"><label>SSH 用户名:</label><input id="ssh_user" type="text"><label>SSH 密码:</label><input id="ssh_pass" type="password"></div><div class="form-row" style="margin-top: 15px; gap: 15px;"><button class="btn secondary" onclick="manageSshUser('create')">创建/更新用户</button><button class="btn danger" onclick="manageSshUser('delete')">删除用户</button></div></div>`; }
+    
+    // ==========================================================
+    // === 关键修改点 (Key Modification Point) ===
+    // ==========================================================
     function renderSettingsPage() {
         const s = appState.settings;
         if (!s) { contentArea.innerHTML = `<div class="card">正在加载初始数据...</div>`; return; }
@@ -318,7 +322,12 @@
                     <div class="form-row"><label>默认目标地址:</label><input id="s_default_target_host" type="text" value="${s.default_target_host}"></div>
                     <div class="form-row"><label>默认目标端口:</label><input id="s_default_target_port" type="text" value="${s.default_target_port}"></div>
                     <div class="form-row"><label>缓冲区(Bytes):</label><input id="s_buffer_size" type="text" value="${s.buffer_size}"></div>
-                    <div class="form-row"><label>连接超时(秒):</label><input id="s_timeout" type="text" value="${s.timeout}"></div>
+                    
+                    <!-- *** MODIFIED/ADDED LINES START *** -->
+                    <div class="form-row"><label>握手超时(秒):</label><input id="s_timeout" type="text" value="${s.timeout}"></div>
+                    <div class="form-row"><label>空闲超时(秒):</label><input id="s_idle_timeout" type="text" value="${s.idle_timeout !== undefined ? s.idle_timeout : 300}"></div>
+                    <!-- *** MODIFIED/ADDED LINES END *** -->
+
                     <div class="form-row" style="justify-content:space-between;padding-left:140px"><label style="min-width:auto;text-align:left;">允许同ID多点登录:</label><input id="s_allow_simultaneous_connections" type="checkbox" ${s.allow_simultaneous_connections ? 'checked' : ''}></div>
                 </div>
                 <div class="settings-group">
@@ -345,7 +354,6 @@
         v.scrollTop = v.scrollHeight;
     }
     
-    // *** THIS IS THE FIXED FUNCTION ***
     async function updateDynamicData() {
         const path = window.location.hash || '#/status';
 
@@ -647,7 +655,7 @@
                 value = value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
             }
             
-            const numberFields = ['http_port', 'tls_port', 'status_port', 'default_target_port', 'buffer_size', 'timeout', 'default_expiry_days', 'default_limit_gb'];
+            const numberFields = ['http_port', 'tls_port', 'status_port', 'default_target_port', 'buffer_size', 'timeout', 'idle_timeout', 'default_expiry_days', 'default_limit_gb'];
             if (numberFields.includes(key)) {
                 value = parseInt(value, 10);
             }
