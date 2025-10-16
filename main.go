@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/cpu"
+	"github.comcom/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -414,17 +414,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		return
 	}
 
-	activeConnInfo := &ActiveConnInfo{
-		Writer:          conn,
-		IP:              remoteIP,
-		ConnKey:         connKey,
-		FirstConnection: time.Now(),
-		LastActive:      time.Now().Unix(),
-		Status:          "握手",
-	}
-	AddActiveConn(connKey, activeConnInfo)
-	defer RemoveActiveConn(connKey)
-
 	reader := bufio.NewReader(conn)
 	forwardingStarted := false
 	var initialData []byte
@@ -521,9 +510,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-			if connInfo, ok := GetActiveConn(connKey); ok {
-				connInfo.Status = "活跃"
-			}
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
@@ -531,17 +517,26 @@ func handleClient(conn net.Conn, isTLS bool) {
 			return
 		}
 	}
+
 	_ = conn.SetReadDeadline(time.Time{})
 	_ = conn.SetWriteDeadline(time.Time{})
 
-	if activeConnInfo, ok := GetActiveConn(connKey); ok {
-		activeConnInfo.DeviceID = finalDeviceID
-		activeConnInfo.Credential = credential
-		if _, ok := deviceUsage.Load(credential); !ok {
-			newUsage := int64(0)
-			deviceUsage.Store(credential, &newUsage)
-		}
+	activeConnInfo := &ActiveConnInfo{
+		Writer:          conn,
+		IP:              remoteIP,
+		ConnKey:         connKey,
+		FirstConnection: time.Now(),
+		LastActive:      time.Now().Unix(),
+		Status:          "活跃",
+		DeviceID:        finalDeviceID,
+		Credential:      credential,
 	}
+	if _, ok := deviceUsage.Load(credential); !ok {
+		newUsage := int64(0)
+		deviceUsage.Store(credential, &newUsage)
+	}
+	AddActiveConn(connKey, activeConnInfo)
+	defer RemoveActiveConn(connKey)
 
 	targetHost := settings.DefaultTargetHost
 	targetPort := settings.DefaultTargetPort
@@ -581,10 +576,10 @@ func handleClient(conn net.Conn, isTLS bool) {
 
 type copyTracker struct {
 	io.Writer
-	ConnInfo     *ActiveConnInfo
-	DeviceID     string
-	Credential   string
-	IsUpload     bool
+	ConnInfo       *ActiveConnInfo
+	DeviceID       string
+	Credential     string
+	IsUpload       bool
 	DeviceUsagePtr *int64
 }
 
@@ -630,7 +625,9 @@ func isUploadName(isUpload bool) string {
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
-	if !ok { return }
+	if !ok {
+		return
+	}
 
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
@@ -680,12 +677,15 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			if tcpSrc, ok := src.(net.Conn); ok {
 				_ = tcpSrc.SetReadDeadline(time.Now().Add(readTimeout))
 			}
-			
+
 			_, err := io.CopyBuffer(tracker, src, buf)
-			
+
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				} else if err == io.EOF {
+					continue
+				}
+
+				if err == io.EOF {
 					Print("[*] Conn %s (%s) %s pipeTraffic source EOF. Closing destination.", connKey, connInfo.IP, isUploadName(isUpload))
 				} else {
 					Print("[!] Conn %s (%s) %s pipeTraffic error: %v. Closing connection.", connKey, connInfo.IP, isUploadName(isUpload), err)
@@ -700,12 +700,16 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
 	m := re.FindStringSubmatch(text)
-	if len(m) > 1 { return strings.TrimSpace(m[1]) }
+	if len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
 	return ""
 }
 func isIPInList(ip string, list []string) bool {
 	for _, item := range list {
-		if item == ip { return true }
+		if item == ip {
+			return true
+		}
 	}
 	return false
 }
@@ -720,11 +724,21 @@ func runCommand(command string, args ...string) (bool, string) {
 	}
 	return true, out.String()
 }
-func manageSshUser(username, password, action string) (bool, string) { return false, "SSH user management is complex and platform-dependent, implementation omitted." }
+func manageSshUser(username, password, action string) (bool, string) {
+	return false, "SSH user management is complex and platform-dependent, implementation omitted."
+}
 
 const sessionCookieName = "wstunnel_session"
-type Session struct { Username string; Expiry time.Time }
-var (sessions = make(map[string]Session); sessionsLock sync.RWMutex)
+
+type Session struct {
+	Username string
+	Expiry   time.Time
+}
+
+var (
+	sessions     = make(map[string]Session)
+	sessionsLock sync.RWMutex
+)
 
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -819,7 +833,9 @@ func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 }
 func formatBytes(b int64) string {
 	const unit = 1024
-	if b < unit { return fmt.Sprintf("%d B", b) }
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
 	div, exp := int64(unit), 0
 	for n := b / unit; n >= unit; n /= unit {
 		div *= unit
@@ -827,6 +843,7 @@ func formatBytes(b int64) string {
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
+
 type APIConnectionResponse struct {
 	DeviceID     string `json:"device_id"`
 	Status       string `json:"status"`
@@ -846,7 +863,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 	var reqData map[string]interface{}
 	if r.Body != nil {
 		body, err := ioutil.ReadAll(r.Body)
-		if err == nil && len(body) > 0 { _ = json.Unmarshal(body, &reqData) }
+		if err == nil && len(body) > 0 {
+			_ = json.Unmarshal(body, &reqData)
+		}
 	}
 	switch r.URL.Path {
 	case "/api/connections":
@@ -857,7 +876,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		})
 		sort.Slice(conns, func(i, j int) bool {
 			statusOrder := map[string]int{"活跃": 0, "握手": 1}
-			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] { return statusOrder[conns[i].Status] < statusOrder[conns[j].Status] }
+			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] {
+				return statusOrder[conns[i].Status] < statusOrder[conns[j].Status]
+			}
 			return conns[i].FirstConnection.Before(conns[j].FirstConnection)
 		})
 		devices := cfg.GetDeviceIDs()
@@ -871,36 +892,44 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 				if timeDelta >= 2 {
 					currentTotalBytes := bytesSent + bytesReceived
 					bytesDelta := currentTotalBytes - c.LastTotalBytesForSpeed
-					if timeDelta > 0 { c.CurrentSpeedBps = float64(bytesDelta) / timeDelta }
+					if timeDelta > 0 {
+						c.CurrentSpeedBps = float64(bytesDelta) / timeDelta
+					}
 					c.LastSpeedUpdateTime = now
 					c.LastTotalBytesForSpeed = currentTotalBytes
 				}
 			}
 			var deviceInfo DeviceInfo
 			var found bool
-			if c.Credential != "" { deviceInfo, found = devices[c.Credential] }
+			if c.Credential != "" {
+				deviceInfo, found = devices[c.Credential]
+			}
 			remainingStr := "无限制"
 			if found && deviceInfo.LimitGB > 0 {
 				var currentUsage int64
-				if val, ok := deviceUsage.Load(c.Credential); ok { currentUsage = atomic.LoadInt64(val.(*int64)) }
+				if val, ok := deviceUsage.Load(c.Credential); ok {
+					currentUsage = atomic.LoadInt64(val.(*int64))
+				}
 				remainingBytes := int64(deviceInfo.LimitGB)*1024*1024*1024 - currentUsage
-				if remainingBytes < 0 { remainingBytes = 0 }
+				if remainingBytes < 0 {
+					remainingBytes = 0
+				}
 				remainingStr = formatBytes(remainingBytes)
 			}
 			lastActiveTimestamp := atomic.LoadInt64(&c.LastActive)
 			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
 			resp = append(resp, APIConnectionResponse{
-				DeviceID: c.DeviceID,
-				Status: c.Status,
-				SentStr: formatBytes(bytesSent),
-				RcvdStr: formatBytes(bytesReceived),
-				SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))),
+				DeviceID:     c.DeviceID,
+				Status:       c.Status,
+				SentStr:      formatBytes(bytesSent),
+				RcvdStr:      formatBytes(bytesReceived),
+				SpeedStr:     fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))),
 				RemainingStr: remainingStr,
-				Expiry: deviceInfo.Expiry,
-				IP: c.IP,
-				FirstConn: c.FirstConnection.Format("15:04:05"),
-				LastActive: lastActiveTime.Format("15:04:05"),
-				ConnKey: c.ConnKey,
+				Expiry:       deviceInfo.Expiry,
+				IP:           c.IP,
+				FirstConn:    c.FirstConnection.Format("15:04:05"),
+				LastActive:   lastActiveTime.Format("15:04:05"),
+				ConnKey:      c.ConnKey,
 			})
 		}
 		sendJSON(w, http.StatusOK, resp)
@@ -934,9 +963,13 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		cfg.lock.Lock()
 		cfg.Settings.EnableDeviceIDAuth = enable
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else {
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
 			statusText := "开启"
-			if !enable { statusText = "关闭" }
+			if !enable {
+				statusText = "关闭"
+			}
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
 		}
 	case "/api/ssh/create", "/api/ssh/delete":
@@ -945,7 +978,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		password, _ := reqData["password"].(string)
 		success, message := manageSshUser(username, password, action)
 		status := "ok"
-		if !success { status = "error" }
+		if !success {
+			status = "error"
+		}
 		sendJSON(w, http.StatusOK, map[string]string{"status": status, "message": message})
 	default:
 		http.NotFound(w, r)
@@ -972,14 +1007,24 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		}
 		limit, _ := strconv.Atoi(limitStr)
 		var ms int
-		if val, ok := maxSessionsRaw.(float64); ok { ms = int(val) } else { ms = 1 }
-		if ms < 1 { ms = 1 }
+		if val, ok := maxSessionsRaw.(float64); ok {
+			ms = int(val)
+		} else {
+			ms = 1
+		}
+		if ms < 1 {
+			ms = 1
+		}
 		cfg.lock.Lock()
 		cfg.DeviceIDs[secWSKey] = DeviceInfo{FriendlyName: friendlyName, Expiry: exp, LimitGB: limit, UsedBytes: 0, MaxSessions: ms, Enabled: true}
 		cfg.lock.Unlock()
 		newUsage := int64(0)
 		deviceUsage.Store(secWSKey, &newUsage)
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"}) }
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设备信息已保存"})
+		}
 	case "/device/set_status":
 		secWSKey, ok1 := reqData["sec_ws_key"].(string)
 		enabled, ok2 := reqData["enabled"].(bool)
@@ -992,9 +1037,13 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			info.Enabled = enabled
 			cfg.DeviceIDs[secWSKey] = info
 			cfg.lock.Unlock()
-			if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()}) } else {
+			if err := cfg.SafeSave(); err != nil {
+				sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": "保存配置失败: " + err.Error()})
+			} else {
 				statusText := "启用"
-				if !enabled { statusText = "禁用" }
+				if !enabled {
+					statusText = "禁用"
+				}
 				sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("设备 %s 已%s", info.FriendlyName, statusText)})
 			}
 		} else {
@@ -1007,17 +1056,27 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		delete(cfg.DeviceIDs, secWSKey)
 		cfg.lock.Unlock()
 		deviceUsage.Delete(secWSKey)
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"}) }
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "删除成功"})
+		}
 	case "/device/reset_traffic":
 		secWSKey, _ := reqData["sec_ws_key"].(string)
-		if val, ok := deviceUsage.Load(secWSKey); ok { atomic.StoreInt64(val.(*int64), 0) }
+		if val, ok := deviceUsage.Load(secWSKey); ok {
+			atomic.StoreInt64(val.(*int64), 0)
+		}
 		cfg.lock.Lock()
 		if info, ok := cfg.DeviceIDs[secWSKey]; ok {
 			info.UsedBytes = 0
 			cfg.DeviceIDs[secWSKey] = info
 		}
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"}) }
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "流量已重置"})
+		}
 	case "/account/update":
 		ou, _ := reqData["old_user"].(string)
 		op, _ := reqData["old_pass"].(string)
@@ -1045,10 +1104,16 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.lock.Lock()
-		if ou != nu { delete(cfg.Accounts, ou) }
+		if ou != nu {
+			delete(cfg.Accounts, ou)
+		}
 		cfg.Accounts[nu] = h
 		cfg.lock.Unlock()
-		if err := cfg.SafeSave(); err != nil { sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()}) } else { sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"}) }
+		if err := cfg.SafeSave(); err != nil {
+			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": err.Error()})
+		} else {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
+		}
 	case "/settings/save":
 		oldSettings := cfg.GetSettings()
 		oldPorts := []int{oldSettings.HTTPPort, oldSettings.TLSPort, oldSettings.StatusPort}
@@ -1114,7 +1179,7 @@ func main() {
 	cfg := GetConfig()
 	InitMetrics()
 	settings := cfg.GetSettings()
-	
+
 	initBufferPool(settings.BufferSize)
 
 	runPeriodicTasks()
@@ -1170,7 +1235,9 @@ func main() {
 	adminMux := http.NewServeMux()
 	adminRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := r.Context().Value("user").(string)
-		if !ok { user = "unknown" }
+		if !ok {
+			user = "unknown"
+		}
 		html := string(adminPanelHTML)
 		meta_tag := fmt.Sprintf(`<meta name="user-context" content="%s">`, user)
 		finalHTML := strings.Replace(html, "<head>", "<head>\n    "+meta_tag, 1)
