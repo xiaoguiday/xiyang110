@@ -1,5 +1,5 @@
 package main
-// 20：54
+
 import (
 	"bufio"
 	"bytes"
@@ -667,19 +667,40 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	}
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 
-	buf := bufferPool.Get().([]byte)
-	defer bufferPool.Put(buf)
-
 	var heartbeatTicker *time.Ticker
 	if !isUpload && settings.HeartbeatInterval > 0 {
 		heartbeatTicker = time.NewTicker(time.Duration(settings.HeartbeatInterval) * time.Second)
 		defer heartbeatTicker.Stop()
 	}
 
+	// Channel to signal completion of the io.Copy operation
+	errCh := make(chan error, 1)
+
+	go func() {
+		buf := bufferPool.Get().([]byte)
+		defer bufferPool.Put(buf)
+		_, err := io.CopyBuffer(tracker, src, buf)
+		errCh <- err
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
+			// Ensure the other connection is closed to unblock io.Copy
+			if c, ok := src.(net.Conn); ok {
+				c.Close()
+			}
+			if c, ok := dst.(net.Conn); ok {
+				c.Close()
+			}
+			return
+		case err := <-errCh:
+			if err != nil && err != io.EOF {
+				Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
+			} else {
+				Print("[*] Conn %s (%s) %s pipeTraffic finished.", connKey, connInfo.IP, isUploadName(isUpload))
+			}
 			return
 		case <-func() <-chan time.Time {
 			if heartbeatTicker != nil {
@@ -689,34 +710,10 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		}():
 			if !isUpload {
 				if err := writeWebSocketPing(tracker.Writer); err != nil {
-					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v. Closing connection.", connInfo.IP, connInfo.DeviceID, err)
+					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v.", connInfo.IP, connInfo.DeviceID, err)
 					return
 				}
 				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
-			}
-		default:
-			readTimeout := time.Duration(settings.Timeout) * time.Second
-			if heartbeatTicker != nil {
-				readTimeout = time.Duration(settings.HeartbeatInterval+5) * time.Second
-			}
-
-			if tcpSrc, ok := src.(net.Conn); ok {
-				_ = tcpSrc.SetReadDeadline(time.Now().Add(readTimeout))
-			}
-
-			_, err := io.CopyBuffer(tracker, src, buf)
-
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					continue
-				}
-
-				if err == io.EOF {
-					Print("[*] Conn %s (%s) %s pipeTraffic source EOF.", connKey, connInfo.IP, isUploadName(isUpload))
-				} else {
-					Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
-				}
-				return
 			}
 		}
 	}
