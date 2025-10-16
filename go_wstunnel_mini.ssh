@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # =================================================================
-# WSTunnel-Go 全自动静默安装/更新脚本 (生产版)
-# 作者: xiaoguidays
-# 更新时间: 2025-10-15
-# 版本: 1.3
-# 更新内容: 增加静默执行和优化编译选项，去除符号表和调试信息。
+# WSTunnel-Go 全自动通用安装/更新脚本 (支持 AMD64 & ARM64)
+# 作者: xiaoguidays (由 Gemini 修改以支持多架构)
+# 更新时间: 2025-10-16
+# 版本: 1.4
+# 更新内容: 自动检测CPU架构 (amd64/arm64)，下载并安装对应的Go环境。
 # =================================================================
 
 set -e # 任何命令失败，脚本立即退出
@@ -38,44 +38,89 @@ fi
 
 # 2. 安装必要的工具 (静默模式)
 info "Step 2: Installing required tools (wget, curl, tar, git)..."
-apt-get update -y > /dev/null 2>&1
-apt-get install -y wget curl tar git > /dev/null 2>&1 || error_exit "Failed to install required tools!"
+if command -v apt-get &> /dev/null; then
+    apt-get update -y > /dev/null 2>&1
+    apt-get install -y wget curl tar git > /dev/null 2>&1
+elif command -v yum &> /dev/null; then
+    yum install -y wget curl tar git > /dev/null 2>&1
+else
+    error_exit "Unsupported package manager. Please install wget, curl, tar, git manually."
+fi
 
-# 3. 安装 Go 语言环境 (静默模式)
+
+# =================================================================
+# --- [核心修改部分开始] ---
+# =================================================================
+
+# 3. 检查并安装 Go 语言环境 (自动适配架构)
 info "Step 3: Checking and installing Go environment..."
+
+# 3.1. 自动检测系统架构
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)
+        GO_ARCH="amd64"
+        ;;
+    aarch64)
+        GO_ARCH="arm64"
+        ;;
+    *)
+        error_exit "Unsupported architecture: $ARCH. Only x86_64 (amd64) and aarch64 (arm64) are supported."
+        ;;
+esac
+info "Detected architecture: $ARCH, using Go archive for $GO_ARCH."
+
+# 3.2. 安装或更新 Go
 if ! command -v go &> /dev/null || [[ ! $(go version) == *"go${GO_VERSION}"* ]]; then
-    info "Go environment not found or version mismatch. Installing Go ${GO_VERSION}..."
-    wget -q -O go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" || error_exit "Failed to download Go package!"
+    info "Go environment not found or version mismatch. Installing Go ${GO_VERSION} for ${GO_ARCH}..."
+    
+    # 动态构建下载链接
+    GO_URL="https://go.dev/dl/go${GO_VERSION}.linux-${GO_ARCH}.tar.gz"
+    
+    wget -q -O go.tar.gz "$GO_URL" || error_exit "Failed to download Go package from $GO_URL!"
     rm -rf /usr/local/go && tar -C /usr/local -xzf go.tar.gz > /dev/null 2>&1 || error_exit "Failed to extract Go package!"
     rm go.tar.gz
 
     if ! grep -q "/usr/local/go/bin" /etc/profile; then
         echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
     fi
+    # 立即将Go路径应用到当前会话
     export PATH=$PATH:/usr/local/go/bin
 fi
+
+# 3.3. 最终检查 Go 命令
 if ! command -v go &> /dev/null; then
     error_exit "Go command is not available. Try running 'source /etc/profile' and re-run the script."
 fi
+info "Go version $(go version) is ready."
+
+# =================================================================
+# --- [核心修改部分结束] ---
+# =================================================================
+
 
 # 4. 创建项目目录并拉取文件 (静默模式)
 info "Step 4: Preparing project directory and fetching source code..."
+# 创建部署目录，以防移动文件时失败
+mkdir -p "$DEPLOY_DIR"
+# 进入源码目录
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR" || error_exit "Failed to enter project directory '$PROJECT_DIR'!"
 
+info "Fetching latest source files..."
 wget -q -O main.go "https://raw.githubusercontent.com/${GITHUB_REPO}/main/main.go" || error_exit "Failed to download main.go!"
 wget -q -O admin.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/admin.html" || error_exit "Failed to download admin.html!"
 wget -q -O login.html "https://raw.githubusercontent.com/${GITHUB_REPO}/main/login.html" || error_exit "Failed to download login.html!"
 
 # 5. 编译项目 (优化编译选项)
-info "Step 5: Compiling the project with optimizations..."
+info "Step 5: Compiling the project natively for ${GO_ARCH}..."
 if [ ! -f "go.mod" ]; then
     go mod init wstunnel > /dev/null 2>&1 || error_exit "go mod init failed!"
 fi
 go mod tidy > /dev/null 2>&1 || error_exit "go mod tidy failed!"
 
-# --- [核心改动] ---
 # 使用 -ldflags "-s -w" 来去除符号表和调试信息
+# 此处不需要 GOOS 和 GOARCH，因为我们已经安装了对应架构的 Go 工具链，是本地原生编译
 go build -ldflags "-s -w" -o ${BINARY_NAME} || error_exit "Compilation failed!"
 info "Project compiled successfully."
 
