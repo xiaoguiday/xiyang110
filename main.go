@@ -727,7 +727,9 @@ func runCommand(command string, args ...string) (bool, string) {
 	return true, out.String()
 }
 
-// +++ 唯一修改点：替换为空白的 manageSshUser 函数 +++
+// ==========================================================
+// --- SSH User Management (Full Implementation) ---
+// ==========================================================
 func manageSshUser(username, password, action string) (bool, string) {
 	if os.Geteuid() != 0 {
 		return false, "此操作需要 root 权限。"
@@ -783,6 +785,11 @@ func manageSshUser(username, password, action string) (bool, string) {
 		}
 		cmd := exec.Command("id", username)
 		if cmd.Run() == nil {
+			// Try to kill user processes before deleting
+			Print("[*] Attempting to kill all processes for user '%s' before deletion.", username)
+			runCommand("pkill", "-u", username)
+			time.Sleep(500 * time.Millisecond) // Give a moment for processes to terminate
+
 			delSuccess, msg := runCommand("userdel", "-r", username)
 			if !delSuccess {
 				return false, fmt.Sprintf("删除用户失败: %s", msg)
