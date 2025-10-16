@@ -1,5 +1,5 @@
 package main
-
+//完美修复
 import (
 	"bufio"
 	"bytes"
@@ -84,6 +84,7 @@ func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, 
 
 var ConfigFile = "ws_config.json"
 
+// ** FIX: Reverted to your original Settings struct **
 type Settings struct {
 	HTTPPort                     int      `json:"http_port"`
 	TLSPort                      int      `json:"tls_port"`
@@ -91,7 +92,7 @@ type Settings struct {
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	Timeout                      int      `json:"timeout"`
+	Timeout                      int      `json:"timeout"` // This is ONLY for handshake
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -104,8 +105,6 @@ type Settings struct {
 	EnableIPWhitelist            bool     `json:"enable_ip_whitelist"`
 	EnableIPBlacklist            bool     `json:"enable_ip_blacklist"`
 	EnableDeviceIDAuth           bool     `json:"enable_device_id_auth"`
-	HandshakeTimeout             int      `json:"handshake_timeout"`
-	HeartbeatInterval            int      `json:"heartbeat_interval"`
 }
 
 type DeviceInfo struct {
@@ -140,6 +139,7 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
+	// ** FIX: Reverted to your original defaults **
 	c.Settings = Settings{
 		HTTPPort:           80,
 		TLSPort:            443,
@@ -148,8 +148,6 @@ func (c *Config) load() error {
 		DefaultTargetPort:  22,
 		BufferSize:         32768,
 		Timeout:            300,
-		HandshakeTimeout:   3,
-		HeartbeatInterval:  45,
 		CertFile:           "/etc/stunnel/certs/stunnel.pem",
 		KeyFile:            "/etc/stunnel/certs/stunnel.key",
 		UAKeywordWS:        "26.4.0",
@@ -279,25 +277,14 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
+// ** FIX: Reverted to your original audit function. No idle timeout check. **
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
 	devices := cfg.GetDeviceIDs()
 
-	nowUnix := time.Now().Unix()
-	idleTimeout := int64(settings.Timeout)
-
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
-
-		if connInfo.Status == "活跃" {
-			if nowUnix-atomic.LoadInt64(&connInfo.LastActive) > idleTimeout {
-				Print("[-] [审计] 踢出闲置连接 %s (设备: %s, IP: %s). LastActive: %v秒前",
-					connInfo.ConnKey, connInfo.DeviceID, connInfo.IP, nowUnix-atomic.LoadInt64(&connInfo.LastActive))
-				connInfo.Writer.Close()
-				return true
-			}
-		}
 
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
@@ -316,12 +303,14 @@ func auditActiveConnections() {
 					connInfo.Writer.Close()
 					return true
 				}
+
 				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
 				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
 					Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 					connInfo.Writer.Close()
 					return true
 				}
+
 				if devInfo.LimitGB > 0 {
 					if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
 						currentUsage := atomic.LoadInt64(usageVal.(*int64))
@@ -362,7 +351,7 @@ func runPeriodicTasks() {
 			collectSystemStatus()
 		}
 	}()
-	auditTicker := time.NewTicker(10 * time.Second)
+	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C {
 			auditActiveConnections()
@@ -461,14 +450,15 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var credential string
 	var deviceInfo DeviceInfo
 
-	handshakeTimeout := time.Duration(settings.HandshakeTimeout) * time.Second
+	// ** FIX: Use settings.Timeout, which is your handshake timeout **
+	handshakeTimeout := time.Duration(settings.Timeout) * time.Second
 
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				Print("[-] Handshake timeout for %s after %v. Closing sniffing connection.", remoteIP, handshakeTimeout)
+				Print("[-] Handshake timeout for %s after %v.", remoteIP, handshakeTimeout)
 			} else if err != io.EOF {
 				Print("[-] Handshake read error from %s: %v", remoteIP, err)
 			} else {
@@ -502,13 +492,13 @@ func handleClient(conn net.Conn, isTLS bool) {
 			}
 			if !deviceInfo.Enabled {
 				Print("[!] Auth Enabled: Device '%s' is disabled. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n账号被禁止,请联系管理员解锁\r\n\r\n"))
+				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
 			}
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
 				Print("[!] Auth Enabled: Device '%s' has expired. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n账号已到期，请联系管理员充值\r\n\r\n"))
+				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
 			}
 			var deviceUsagePtr *int64
@@ -521,23 +511,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 			}
 			if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
 				Print("[!] Auth Enabled: Traffic limit reached for '%s'. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n流量已耗尽，联系管理员充值\r\n\r\n"))
+				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
 				return
 			}
 		} else {
 			if !found {
 				finalDeviceID = remoteIP
-				credential = remoteIP
-				deviceInfo = DeviceInfo{
-					FriendlyName: finalDeviceID,
-					Expiry:       time.Now().AddDate(100, 0, 0).Format("2006-01-02"),
-					LimitGB:      0,
-					UsedBytes:    0,
-					MaxSessions:  1,
-					Enabled:      true,
-				}
-				newUsage := int64(0)
-				deviceUsage.Store(credential, &newUsage)
 			}
 		}
 
@@ -566,7 +545,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 	}
 
 	_ = conn.SetReadDeadline(time.Time{})
-	_ = conn.SetWriteDeadline(time.Time{})
 
 	targetHost := settings.DefaultTargetHost
 	targetPort := settings.DefaultTargetPort
@@ -631,16 +609,6 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	return
 }
 
-const (
-	OpcodePing = 0x9
-)
-
-func writeWebSocketPing(w io.Writer) error {
-	header := []byte{0x80 | OpcodePing, 0x00}
-	_, err := w.Write(header)
-	return err
-}
-
 func isUploadName(isUpload bool) string {
 	if isUpload {
 		return "upload (client->target)"
@@ -649,15 +617,12 @@ func isUploadName(isUpload bool) string {
 }
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey string, cancel context.CancelFunc, isUpload bool) {
 	defer wg.Done()
-	defer cancel()
+	defer cancel() // When this goroutine exits, cancel the context to signal the other one.
 
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok {
 		return
 	}
-
-	cfg := GetConfig()
-	settings := cfg.GetSettings()
 
 	var deviceUsagePtr *int64
 	if connInfo.Credential != "" {
@@ -666,12 +631,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		}
 	}
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
-
-	var activityTicker *time.Ticker
-	if settings.HeartbeatInterval > 0 {
-		activityTicker = time.NewTicker(time.Duration(settings.HeartbeatInterval) * time.Second)
-		defer activityTicker.Stop()
-	}
 
 	errCh := make(chan error, 1)
 
@@ -682,42 +641,32 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		errCh <- err
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
-			if c, ok := src.(net.Conn); ok {
-				c.Close()
-			}
-			if c, ok := dst.(net.Conn); ok {
-				c.Close()
-			}
-			return
-		case err := <-errCh:
-			if err != nil && err != io.EOF {
-				Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
-			} else {
-				Print("[*] Conn %s (%s) %s pipeTraffic finished.", connKey, connInfo.IP, isUploadName(isUpload))
-			}
-			return
-		case <-func() <-chan time.Time {
-			if activityTicker != nil {
-				return activityTicker.C
-			}
-			return nil
-		}():
-			if isUpload {
-				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
-			} else {
-				if err := writeWebSocketPing(tracker.Writer); err != nil {
-					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v.", connInfo.IP, connInfo.DeviceID, err)
-					return
-				}
-				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
-			}
+	select {
+	case <-ctx.Done():
+		// Context was cancelled, likely by the other pipeTraffic goroutine finishing.
+		// We must ensure the blocked io.Copy in our goroutine can exit.
+		// The most reliable way is to close the underlying connections.
+		if c, ok := src.(net.Conn); ok {
+			c.Close()
 		}
+		dst.Close()
+		Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
+		return
+	case err := <-errCh:
+		// io.Copy finished on its own (due to EOF or another network error).
+		if err != nil && err != io.EOF {
+			Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
+		} else {
+			Print("[*] Conn %s (%s) %s pipeTraffic finished.", connKey, connInfo.IP, isUploadName(isUpload))
+		}
+		// Signal the other direction to close by half-closing the destination connection.
+		if tcpConn, ok := dst.(*net.TCPConn); ok {
+			_ = tcpConn.CloseWrite()
+		}
+		return
 	}
 }
+
 
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
@@ -1157,11 +1106,11 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if portsChanged || oldSettings.HandshakeTimeout != newSettings.HandshakeTimeout || oldSettings.Timeout != newSettings.Timeout || oldSettings.HeartbeatInterval != newSettings.HeartbeatInterval {
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "重要设置已更改, 服务正在重启..."})
+		if portsChanged {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
 			go func() {
 				time.Sleep(1 * time.Second)
-				Print("[*] Important settings changed. Restarting server...")
+				Print("[*] Port settings changed. Restarting server...")
 				executable, _ := os.Executable()
 				cmd := exec.Command(executable, os.Args[1:]...)
 				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
@@ -1199,10 +1148,9 @@ func main() {
 	}
 	Print("[*] WSTunnel-Go starting...")
 	cfg := GetConfig()
+	initBufferPool(cfg.Settings.BufferSize)
 	InitMetrics()
 	settings := cfg.GetSettings()
-
-	initBufferPool(settings.BufferSize)
 
 	runPeriodicTasks()
 
