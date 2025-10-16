@@ -1,5 +1,5 @@
 package main
-//完美修复
+
 import (
 	"bufio"
 	"bytes"
@@ -84,7 +84,7 @@ func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, 
 
 var ConfigFile = "ws_config.json"
 
-// ** FIX: Reverted to your original Settings struct **
+// Settings struct with dedicated IdleTimeout
 type Settings struct {
 	HTTPPort                     int      `json:"http_port"`
 	TLSPort                      int      `json:"tls_port"`
@@ -92,7 +92,8 @@ type Settings struct {
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	Timeout                      int      `json:"timeout"` // This is ONLY for handshake
+	Timeout                      int      `json:"timeout"`       // For handshake
+	IdleTimeout                  int      `json:"idle_timeout"`  // For idle connections
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -139,7 +140,6 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	// ** FIX: Reverted to your original defaults **
 	c.Settings = Settings{
 		HTTPPort:           80,
 		TLSPort:            443,
@@ -147,7 +147,8 @@ func (c *Config) load() error {
 		DefaultTargetHost:  "127.0.0.1",
 		DefaultTargetPort:  22,
 		BufferSize:         32768,
-		Timeout:            300,
+		Timeout:            300, // Default handshake timeout
+		IdleTimeout:        300, // Default idle connection timeout
 		CertFile:           "/etc/stunnel/certs/stunnel.pem",
 		KeyFile:            "/etc/stunnel/certs/stunnel.key",
 		UAKeywordWS:        "26.4.0",
@@ -277,7 +278,6 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// ** FIX: Reverted to your original audit function. No idle timeout check. **
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
@@ -285,6 +285,16 @@ func auditActiveConnections() {
 
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
+
+		// Use the new IdleTimeout setting for kicking idle connections
+		idleTimeout := time.Duration(settings.IdleTimeout + 30) * time.Second
+		lastActiveTime := time.Unix(atomic.LoadInt64(&connInfo.LastActive), 0)
+
+		if time.Since(lastActiveTime) > idleTimeout {
+			Print("[-] [审计] 踢出空闲超时的连接 (设备: %s, IP: %s)，空闲时长超过 %v", connInfo.DeviceID, connInfo.IP, idleTimeout)
+			connInfo.Writer.Close()
+			return true
+		}
 
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
@@ -450,7 +460,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var credential string
 	var deviceInfo DeviceInfo
 
-	// ** FIX: Use settings.Timeout, which is your handshake timeout **
+	// Use the dedicated 'Timeout' setting for the handshake
 	handshakeTimeout := time.Duration(settings.Timeout) * time.Second
 
 	for !forwardingStarted {
@@ -617,7 +627,7 @@ func isUploadName(isUpload bool) string {
 }
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey string, cancel context.CancelFunc, isUpload bool) {
 	defer wg.Done()
-	defer cancel() // When this goroutine exits, cancel the context to signal the other one.
+	defer cancel()
 
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok {
@@ -643,9 +653,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 
 	select {
 	case <-ctx.Done():
-		// Context was cancelled, likely by the other pipeTraffic goroutine finishing.
-		// We must ensure the blocked io.Copy in our goroutine can exit.
-		// The most reliable way is to close the underlying connections.
 		if c, ok := src.(net.Conn); ok {
 			c.Close()
 		}
@@ -653,20 +660,17 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
 		return
 	case err := <-errCh:
-		// io.Copy finished on its own (due to EOF or another network error).
 		if err != nil && err != io.EOF {
 			Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
 		} else {
 			Print("[*] Conn %s (%s) %s pipeTraffic finished.", connKey, connInfo.IP, isUploadName(isUpload))
 		}
-		// Signal the other direction to close by half-closing the destination connection.
 		if tcpConn, ok := dst.(*net.TCPConn); ok {
 			_ = tcpConn.CloseWrite()
 		}
 		return
 	}
 }
-
 
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
