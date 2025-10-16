@@ -84,7 +84,6 @@ func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, 
 
 var ConfigFile = "ws_config.json"
 
-// Settings struct with dedicated IdleTimeout
 type Settings struct {
 	HTTPPort                     int      `json:"http_port"`
 	TLSPort                      int      `json:"tls_port"`
@@ -92,8 +91,8 @@ type Settings struct {
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	Timeout                      int      `json:"timeout"`       // For handshake
-	IdleTimeout                  int      `json:"idle_timeout"`  // For idle connections
+	Timeout                      int      `json:"timeout"`
+	IdleTimeout                  int      `json:"idle_timeout"`
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -147,8 +146,8 @@ func (c *Config) load() error {
 		DefaultTargetHost:  "127.0.0.1",
 		DefaultTargetPort:  22,
 		BufferSize:         32768,
-		Timeout:            300, // Default handshake timeout
-		IdleTimeout:        300, // Default idle connection timeout
+		Timeout:            300,
+		IdleTimeout:        300,
 		CertFile:           "/etc/stunnel/certs/stunnel.pem",
 		KeyFile:            "/etc/stunnel/certs/stunnel.key",
 		UAKeywordWS:        "26.4.0",
@@ -286,7 +285,6 @@ func auditActiveConnections() {
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
 
-		// Use the new IdleTimeout setting for kicking idle connections
 		idleTimeout := time.Duration(settings.IdleTimeout + 30) * time.Second
 		lastActiveTime := time.Unix(atomic.LoadInt64(&connInfo.LastActive), 0)
 
@@ -415,6 +413,14 @@ func collectSystemStatus() {
 	systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived)
 }
 
+// +++ 修正点1：新增一个辅助函数，用于发送格式正确的HTTP错误响应 +++
+func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText string, body string) {
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s",
+		statusCode, statusText, len(body), body)
+	_, _ = conn.Write([]byte(response))
+	conn.Close()
+}
+
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -460,7 +466,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var credential string
 	var deviceInfo DeviceInfo
 
-	// Use the dedicated 'Timeout' setting for the handshake
 	handshakeTimeout := time.Duration(settings.Timeout) * time.Second
 
 	for !forwardingStarted {
@@ -497,18 +502,18 @@ func handleClient(conn net.Conn, isTLS bool) {
 		if settings.EnableDeviceIDAuth {
 			if !found {
 				Print("[!] Auth Enabled: Invalid Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
-				_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\n\r\n"))
+				sendHTTPErrorAndClose(conn, 401, "Unauthorized", "Unauthorized")
 				return
 			}
 			if !deviceInfo.Enabled {
 				Print("[!] Auth Enabled: Device '%s' is disabled. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+				sendHTTPErrorAndClose(conn, 403, "Forbidden", "账号被禁止,请联系管理员解锁")
 				return
 			}
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
 				Print("[!] Auth Enabled: Device '%s' has expired. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+				sendHTTPErrorAndClose(conn, 403, "Forbidden", "账号已到期，请联系管理员充值")
 				return
 			}
 			var deviceUsagePtr *int64
@@ -521,12 +526,35 @@ func handleClient(conn net.Conn, isTLS bool) {
 			}
 			if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
 				Print("[!] Auth Enabled: Traffic limit reached for '%s'. Rejecting.", finalDeviceID)
-				_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+				sendHTTPErrorAndClose(conn, 403, "Forbidden", "流量已耗尽，联系管理员充值")
 				return
 			}
 		} else {
 			if !found {
 				finalDeviceID = remoteIP
+			}
+		}
+
+		// +++ 修正点2：实现“禁止同ID多点登录”逻辑 +++
+		if !settings.AllowSimultaneousConnections && credential != "" && found {
+			var existingSessionCount int
+			activeConns.Range(func(key, value interface{}) bool {
+				if conn, ok := value.(*ActiveConnInfo); ok {
+					if conn.Credential == credential && conn.Status == "活跃" {
+						existingSessionCount++
+					}
+				}
+				// 理论上max_sessions为1时，找到一个就可以停止了
+				if deviceInfo.MaxSessions > 0 && existingSessionCount >= deviceInfo.MaxSessions {
+					return false
+				}
+				return true
+			})
+
+			if deviceInfo.MaxSessions > 0 && existingSessionCount >= deviceInfo.MaxSessions {
+				Print("[!] Auth: Device '%s' has reached its max session limit (%d). Rejecting.", finalDeviceID, deviceInfo.MaxSessions)
+				sendHTTPErrorAndClose(conn, 409, "Conflict", "该设备已在线，不允许同时登录")
+				return
 			}
 		}
 
@@ -549,7 +577,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
-			_, _ = conn.Write([]byte("HTTP/1.1 403 Forbidden\r\n\r\n"))
+			sendHTTPErrorAndClose(conn, 403, "Forbidden", "Forbidden")
 			return
 		}
 	}
@@ -833,9 +861,6 @@ type APIConnectionResponse struct {
 	ConnKey      string `json:"conn_key"`
 }
 
-// ==========================================================
-// === 关键修改点 (Key Modification Point) ===
-// ==========================================================
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -951,11 +976,10 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
 		}
 
-	// +++ 新增的重启服务接口 +++
 	case "/api/server/restart":
 		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "服务正在重启..."})
 		go func() {
-			time.Sleep(1 * time.Second) // 留出时间让HTTP响应发送出去
+			time.Sleep(1 * time.Second)
 			Print("[*] Manual restart triggered from admin panel.")
 			executable, _ := os.Executable()
 			cmd := exec.Command(executable, os.Args[1:]...)
@@ -966,7 +990,6 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			os.Exit(0)
 		}()
-	// +++ 新增逻辑结束 +++
 
 	case "/api/ssh/create", "/api/ssh/delete":
 		action := filepath.Base(r.URL.Path)
