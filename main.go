@@ -603,7 +603,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, cancel, true)
 	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, cancel, false)
 	wg.Wait()
-	cancel() // Ensure cancel is called even if pipeTraffic panics
+	cancel()
 }
 
 type copyTracker struct {
@@ -649,7 +649,6 @@ func isUploadName(isUpload bool) string {
 }
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey string, cancel context.CancelFunc, isUpload bool) {
 	defer wg.Done()
-	// ** FIX: When one pipe fails, it cancels the context, signaling the other to stop. **
 	defer cancel()
 
 	connInfo, ok := GetActiveConn(connKey)
@@ -691,7 +690,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			if !isUpload {
 				if err := writeWebSocketPing(tracker.Writer); err != nil {
 					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v. Closing connection.", connInfo.IP, connInfo.DeviceID, err)
-					return // This will trigger defer cancel()
+					return
 				}
 				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
 			}
@@ -708,7 +707,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			_, err := io.CopyBuffer(tracker, src, buf)
 
 			if err != nil {
-				// ** FIX: Ignore timeout errors, just continue the loop. **
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
@@ -718,7 +716,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 				} else {
 					Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
 				}
-				return // Any other error will exit and trigger defer cancel()
+				return
 			}
 		}
 	}
