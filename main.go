@@ -1,5 +1,5 @@
 package main
-
+// 10-16-20-23
 import (
 	"bufio"
 	"bytes"
@@ -104,6 +104,8 @@ type Settings struct {
 	EnableIPWhitelist            bool     `json:"enable_ip_whitelist"`
 	EnableIPBlacklist            bool     `json:"enable_ip_blacklist"`
 	EnableDeviceIDAuth           bool     `json:"enable_device_id_auth"`
+	HandshakeTimeout             int      `json:"handshake_timeout"`
+	HeartbeatInterval            int      `json:"heartbeat_interval"`
 }
 
 type DeviceInfo struct {
@@ -138,7 +140,25 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	c.Settings = Settings{HTTPPort: 80, TLSPort: 443, StatusPort: 9090, DefaultTargetHost: "127.0.0.1", DefaultTargetPort: 22, BufferSize: 32768, Timeout: 300, CertFile: "/etc/stunnel/certs/stunnel.pem", KeyFile: "/etc/stunnel/certs/stunnel.key", UAKeywordWS: "26.4.0", UAKeywordProbe: "1.0", AllowSimultaneousConnections: false, DefaultExpiryDays: 30, DefaultLimitGB: 100, EnableDeviceIDAuth: true}
+	c.Settings = Settings{
+		HTTPPort:           80,
+		TLSPort:            443,
+		StatusPort:         9090,
+		DefaultTargetHost:  "127.0.0.1",
+		DefaultTargetPort:  22,
+		BufferSize:         32768,
+		Timeout:            300,
+		HandshakeTimeout:   3,
+		HeartbeatInterval:  45,
+		CertFile:           "/etc/stunnel/certs/stunnel.pem",
+		KeyFile:            "/etc/stunnel/certs/stunnel.key",
+		UAKeywordWS:        "26.4.0",
+		UAKeywordProbe:     "1.0",
+		AllowSimultaneousConnections: false,
+		DefaultExpiryDays:  30,
+		DefaultLimitGB:     100,
+		EnableDeviceIDAuth: true,
+	}
 	c.Accounts = map[string]string{"admin": "admin"}
 	c.DeviceIDs = make(map[string]DeviceInfo)
 	data, err := ioutil.ReadFile(ConfigFile)
@@ -161,8 +181,16 @@ func (c *Config) save() error {
 	}
 	return ioutil.WriteFile(ConfigFile, data, 0644)
 }
-func (c *Config) SafeSave() error { c.lock.Lock(); defer c.lock.Unlock(); return c.save() }
-func (c *Config) GetSettings() Settings { c.lock.RLock(); defer c.lock.RUnlock(); return c.Settings }
+func (c *Config) SafeSave() error {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+	return c.save()
+}
+func (c *Config) GetSettings() Settings {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	return c.Settings
+}
 func (c *Config) GetAccounts() map[string]string {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -237,8 +265,8 @@ func InitMetrics() {
 	cfg := GetConfig()
 	devices := cfg.GetDeviceIDs()
 	for id, info := range devices {
-		initialUsage := info.UsedBytes
-		deviceUsage.Store(id, &initialUsage)
+		newUsage := info.UsedBytes
+		deviceUsage.Store(id, &newUsage)
 	}
 }
 
@@ -256,8 +284,20 @@ func auditActiveConnections() {
 	settings := cfg.GetSettings()
 	devices := cfg.GetDeviceIDs()
 
+	nowUnix := time.Now().Unix()
+	idleTimeout := int64(settings.Timeout)
+
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
+
+		if connInfo.Status == "活跃" {
+			if nowUnix-atomic.LoadInt64(&connInfo.LastActive) > idleTimeout {
+				Print("[-] [审计] 踢出闲置连接 %s (设备: %s, IP: %s). LastActive: %v秒前",
+					connInfo.ConnKey, connInfo.DeviceID, connInfo.IP, nowUnix-atomic.LoadInt64(&connInfo.LastActive))
+				connInfo.Writer.Close()
+				return true
+			}
+		}
 
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
@@ -298,9 +338,11 @@ func auditActiveConnections() {
 				return true
 			}
 		} else {
-			Print("[-] [审计] 踢出无凭证的非法连接 (IP: %s)", connInfo.IP)
-			connInfo.Writer.Close()
-			return true
+			if connInfo.Status == "活跃" {
+				Print("[-] [审计] 踢出无凭证的活跃连接 (IP: %s)", connInfo.IP)
+				connInfo.Writer.Close()
+				return true
+			}
 		}
 
 		return true
@@ -320,7 +362,7 @@ func runPeriodicTasks() {
 			collectSystemStatus()
 		}
 	}()
-	auditTicker := time.NewTicker(15 * time.Second)
+	auditTicker := time.NewTicker(10 * time.Second)
 	go func() {
 		for range auditTicker.C {
 			auditActiveConnections()
@@ -342,6 +384,8 @@ func saveDeviceUsage() {
 				cfg.DeviceIDs[id] = info
 				isDirty = true
 			}
+		} else {
+			deviceUsage.Delete(id)
 		}
 		return true
 	})
@@ -351,6 +395,7 @@ func saveDeviceUsage() {
 		}
 	}
 }
+
 func collectSystemStatus() {
 	systemStatusMutex.Lock()
 	defer systemStatusMutex.Unlock()
@@ -397,6 +442,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		return
 	}
 
+	// ** FIX: Add connection to map immediately for sniffing visibility **
 	activeConnInfo := &ActiveConnInfo{
 		Writer:          conn,
 		IP:              remoteIP,
@@ -416,14 +462,14 @@ func handleClient(conn net.Conn, isTLS bool) {
 	var credential string
 	var deviceInfo DeviceInfo
 
-	handshakeTimeout := 3 * time.Second
+	handshakeTimeout := time.Duration(settings.HandshakeTimeout) * time.Second
 
 	for !forwardingStarted {
 		_ = conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				Print("[-] Handshake timeout for %s after %v.", remoteIP, handshakeTimeout)
+				Print("[-] Handshake timeout for %s after %v. Closing sniffing connection.", remoteIP, handshakeTimeout)
 			} else if err != io.EOF {
 				Print("[-] Handshake read error from %s: %v", remoteIP, err)
 			} else {
@@ -495,6 +541,14 @@ func handleClient(conn net.Conn, isTLS bool) {
 				deviceUsage.Store(credential, &newUsage)
 			}
 		}
+		
+		// ** FIX: Update existing connInfo instead of creating a new one **
+		activeConnInfo.DeviceID = finalDeviceID
+		activeConnInfo.Credential = credential
+		if _, ok := deviceUsage.Load(credential); !ok {
+			newUsage := int64(0)
+			deviceUsage.Store(credential, &newUsage)
+		}
 
 		ua := req.UserAgent()
 		if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
@@ -504,9 +558,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-			if connInfo, ok := GetActiveConn(connKey); ok {
-				connInfo.Status = "活跃"
-			}
+			activeConnInfo.Status = "活跃" // ** FIX: Update status **
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
@@ -514,17 +566,9 @@ func handleClient(conn net.Conn, isTLS bool) {
 			return
 		}
 	}
+
 	_ = conn.SetReadDeadline(time.Time{})
 	_ = conn.SetWriteDeadline(time.Time{})
-
-	if activeConnInfo, ok := GetActiveConn(connKey); ok {
-		activeConnInfo.DeviceID = finalDeviceID
-		activeConnInfo.Credential = credential
-		if _, ok := deviceUsage.Load(credential); !ok {
-			newUsage := int64(0)
-			deviceUsage.Store(credential, &newUsage)
-		}
-	}
 
 	targetHost := settings.DefaultTargetHost
 	targetPort := settings.DefaultTargetPort
@@ -606,12 +650,21 @@ func writeWebSocketPing(w io.Writer) error {
 	return err
 }
 
+func isUploadName(isUpload bool) string {
+	if isUpload {
+		return "upload (client->target)"
+	}
+	return "download (target->client)"
+}
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok {
 		return
 	}
+
+	cfg := GetConfig()
+	settings := cfg.GetSettings()
 
 	var deviceUsagePtr *int64
 	if credential != "" {
@@ -624,94 +677,59 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
 
-	// Heartbeat Logic Fix
 	var heartbeatTicker *time.Ticker
-	var heartbeatChan <-chan time.Time // Declare a read-only channel. It's nil by default.
-	if !isUpload {                      // Only create ticker for the server->client (download) direction
-		heartbeatTicker = time.NewTicker(45 * time.Second)
-		heartbeatChan = heartbeatTicker.C // Assign the ticker's channel to it
+	if !isUpload && settings.HeartbeatInterval > 0 {
+		heartbeatTicker = time.NewTicker(time.Duration(settings.HeartbeatInterval) * time.Second)
 		defer heartbeatTicker.Stop()
 	}
-	// If isUpload is true, heartbeatChan remains nil, which is safe for the select statement.
 
 	for {
 		select {
 		case <-ctx.Done():
-			Print("[*] Conn %s (%s) pipeTraffic stopped by context.Done()", connKey, connInfo.IP)
+			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context.Done().", connKey, connInfo.IP, isUploadName(isUpload))
 			return
-
-		case <-heartbeatChan: // This is now safe. It only triggers when heartbeatChan is not nil.
-			if err := writeWebSocketPing(tracker.Writer); err != nil {
-				Print("[!] Failed to send WebSocket Ping to %s: %v. Closing connection.", connInfo.IP, err)
-				connInfo.Writer.Close() // Close the main client connection
-				return
+		case <-func() <-chan time.Time {
+			if heartbeatTicker != nil {
+				return heartbeatTicker.C
 			}
-			// Sending a ping is a form of activity.
-			atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
-
-		default:
-			// Read Timeout Logic
-			// We set a deadline on the source connection to unblock the io.CopyBuffer call periodically.
-			// This allows the select statement to check for ctx.Done() or heartbeats.
-			settings := GetConfig().GetSettings()
-			readTimeout := time.Duration(settings.Timeout) * time.Second
-
-			// In the download direction, the source is the target connection.
-			// Let's use a shorter timeout to allow heartbeats to be sent promptly.
+			return nil
+		}():
 			if !isUpload {
-				readTimeout = 50 * time.Second // Slightly longer than heartbeat interval
-			}
-
-			var sourceConn net.Conn
-			if conn, ok := src.(net.Conn); ok {
-				// This handles the download direction where src is targetConn.
-				sourceConn = conn
-			} else if _, ok := src.(*bufio.Reader); ok {
-				// This handles the upload direction where src is a bufio.Reader wrapping the client conn.
-				// The client conn is stored in connInfo.Writer.
-				sourceConn = connInfo.Writer
-			}
-
-			if sourceConn != nil {
-				_ = sourceConn.SetReadDeadline(time.Now().Add(readTimeout))
-			}
-
-			// Perform the data copy
-			n, err := io.CopyBuffer(tracker, src, buf)
-			if n > 0 {
-				// Data was transferred, so reset the idle timer.
+				if err := writeWebSocketPing(tracker.Writer); err != nil {
+					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v. Closing connection.", connInfo.IP, connInfo.DeviceID, err)
+					connInfo.Writer.Close()
+					return
+				}
 				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
 			}
+		default:
+			readTimeout := time.Duration(settings.Timeout) * time.Second
+			if heartbeatTicker != nil {
+				readTimeout = time.Duration(settings.HeartbeatInterval+5) * time.Second
+			}
+
+			if tcpSrc, ok := src.(net.Conn); ok {
+				_ = tcpSrc.SetReadDeadline(time.Now().Add(readTimeout))
+			}
+
+			_, err := io.CopyBuffer(tracker, src, buf)
 
 			if err != nil {
-				// If the error is a timeout, it's an expected condition to unblock the loop.
-				// We just continue to the next iteration of the select statement.
+				// ** FIX: Ignore timeout errors, continue loop **
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
 
-				// If it's any other error (like EOF), the connection is considered closed.
 				if err == io.EOF {
-					Print("[*] Conn %s (%s) %s pipeTraffic source EOF.", connKey, connInfo.IP, isUploadName(isUpload))
+					Print("[*] Conn %s (%s) %s pipeTraffic source EOF. Closing destination.", connKey, connInfo.IP, isUploadName(isUpload))
 				} else {
-					if !strings.Contains(err.Error(), "use of closed network connection") {
-						Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
-					}
+					Print("[!] Conn %s (%s) %s pipeTraffic error: %v. Closing connection.", connKey, connInfo.IP, isUploadName(isUpload), err)
 				}
-				
-				connInfo.Writer.Close() // Close the main client connection
-				dst.Close()             // Close the other end of the pipe
+				connInfo.Writer.Close()
 				return
 			}
 		}
 	}
-}
-
-func isUploadName(isUpload bool) string {
-	if isUpload {
-		return "upload (client->target)"
-	}
-	return "download (target->client)"
 }
 
 func extractHeaderValue(text, name string) string {
@@ -829,7 +847,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	sessionsLock.Lock()
 	sessions[sessionToken] = Session{Username: creds.Username, Expiry: expiry}
 	sessionsLock.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionToken, Expires: expiry, Path: "/", HttpOnly: true})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: sessionToken, Expires: expiry, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
 	sendJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 func logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -839,7 +857,7 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 		delete(sessions, cookie.Value)
 		sessionsLock.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusOK)
 }
 func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
@@ -935,14 +953,25 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			lastActiveTimestamp := atomic.LoadInt64(&c.LastActive)
 			lastActiveTime := time.Unix(lastActiveTimestamp, 0)
-			resp = append(resp, APIConnectionResponse{DeviceID: c.DeviceID, Status: c.Status, SentStr: formatBytes(bytesSent), RcvdStr: formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))), RemainingStr: remainingStr, Expiry: deviceInfo.Expiry, IP: c.IP, FirstConn: c.FirstConnection.Format("15:04:05"), LastActive: lastActiveTime.Format("15:04:05"), ConnKey: c.ConnKey})
+			resp = append(resp, APIConnectionResponse{
+				DeviceID:     c.DeviceID,
+				Status:       c.Status,
+				SentStr:      formatBytes(bytesSent),
+				RcvdStr:      formatBytes(bytesReceived),
+				SpeedStr:     fmt.Sprintf("%s/s", formatBytes(int64(c.CurrentSpeedBps))),
+				RemainingStr: remainingStr,
+				Expiry:       deviceInfo.Expiry,
+				IP:           c.IP,
+				FirstConn:    c.FirstConnection.Format("15:04:05"),
+				LastActive:   lastActiveTime.Format("15:04:05"),
+				ConnKey:      c.ConnKey,
+			})
 		}
 		sendJSON(w, http.StatusOK, resp)
 	case "/api/kick":
 		connKey, _ := reqData["conn_key"].(string)
 		if conn, ok := GetActiveConn(connKey); ok {
 			_ = conn.Writer.Close()
-			RemoveActiveConn(connKey)
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "连接已踢掉"})
 		} else {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "连接未找到"})
@@ -1141,11 +1170,11 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		if portsChanged {
-			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
+		if portsChanged || oldSettings.HandshakeTimeout != newSettings.HandshakeTimeout || oldSettings.Timeout != newSettings.Timeout || oldSettings.HeartbeatInterval != newSettings.HeartbeatInterval {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "重要设置已更改, 服务正在重启..."})
 			go func() {
 				time.Sleep(1 * time.Second)
-				Print("[*] Port settings changed. Restarting server...")
+				Print("[*] Important settings changed. Restarting server...")
 				executable, _ := os.Executable()
 				cmd := exec.Command(executable, os.Args[1:]...)
 				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
@@ -1231,9 +1260,11 @@ func main() {
 					go handleClient(conn, true)
 				}
 			}()
+		} else {
+			Print("[!] TLS Key file '%s' not found. WSS server will not start.", settings.KeyFile)
 		}
 	} else {
-		Print("[!] Cert/Key file not found. WSS server will not start.")
+		Print("[!] TLS Cert file '%s' not found. WSS server will not start.", settings.CertFile)
 	}
 
 	adminMux := http.NewServeMux()
@@ -1262,7 +1293,7 @@ func main() {
 	adminAddr := fmt.Sprintf("0.0.0.0:%d", settings.StatusPort)
 	Print("[*] Status on http://127.0.0.1:%d", settings.StatusPort)
 	if err := http.ListenAndServe(adminAddr, adminMux); err != nil {
-		Print("[!] FATAL: Failed to start admin server on %s: %v", err)
+		Print("[!] FATAL: Failed to start admin server on %s: %v", adminAddr, err)
 		os.Exit(1)
 	}
 }
