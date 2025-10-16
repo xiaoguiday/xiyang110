@@ -762,10 +762,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			}
 			// 成功读取到数据，继续循环
 		}
-	}
-}
-
-// (接第一部分代码)
 
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
