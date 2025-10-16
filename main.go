@@ -1,5 +1,5 @@
 package main
-// 10-16-20-23
+
 import (
 	"bufio"
 	"bytes"
@@ -442,7 +442,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		return
 	}
 
-	// ** FIX: Add connection to map immediately for sniffing visibility **
 	activeConnInfo := &ActiveConnInfo{
 		Writer:          conn,
 		IP:              remoteIP,
@@ -541,8 +540,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 				deviceUsage.Store(credential, &newUsage)
 			}
 		}
-		
-		// ** FIX: Update existing connInfo instead of creating a new one **
+
 		activeConnInfo.DeviceID = finalDeviceID
 		activeConnInfo.Credential = credential
 		if _, ok := deviceUsage.Load(credential); !ok {
@@ -558,7 +556,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		}
 		if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 			_, _ = conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
-			activeConnInfo.Status = "活跃" // ** FIX: Update status **
+			activeConnInfo.Status = "活跃"
 			forwardingStarted = true
 		} else {
 			Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
@@ -602,17 +600,15 @@ func handleClient(conn net.Conn, isTLS bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true)
-	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false)
+	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, cancel, true)
+	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, cancel, false)
 	wg.Wait()
-	cancel()
+	cancel() // Ensure cancel is called even if pipeTraffic panics
 }
 
 type copyTracker struct {
 	io.Writer
 	ConnInfo       *ActiveConnInfo
-	DeviceID       string
-	Credential     string
 	IsUpload       bool
 	DeviceUsagePtr *int64
 }
@@ -627,7 +623,7 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 			atomic.AddInt64(&globalBytesReceived, int64(n))
 			atomic.AddInt64(&c.ConnInfo.BytesReceived, int64(n))
 		}
-		if c.Credential != "" && c.DeviceUsagePtr != nil {
+		if c.ConnInfo.Credential != "" && c.DeviceUsagePtr != nil {
 			atomic.AddInt64(c.DeviceUsagePtr, int64(n))
 		}
 		atomic.StoreInt64(&c.ConnInfo.LastActive, time.Now().Unix())
@@ -636,12 +632,7 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 }
 
 const (
-	OpcodeContinuation = 0x0
-	OpcodeText         = 0x1
-	OpcodeBinary       = 0x2
-	OpcodeClose        = 0x8
-	OpcodePing         = 0x9
-	OpcodePong         = 0xA
+	OpcodePing = 0x9
 )
 
 func writeWebSocketPing(w io.Writer) error {
@@ -656,8 +647,11 @@ func isUploadName(isUpload bool) string {
 	}
 	return "download (target->client)"
 }
-func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
+func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey string, cancel context.CancelFunc, isUpload bool) {
 	defer wg.Done()
+	// ** FIX: When one pipe fails, it cancels the context, signaling the other to stop. **
+	defer cancel()
+
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok {
 		return
@@ -667,12 +661,12 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	settings := cfg.GetSettings()
 
 	var deviceUsagePtr *int64
-	if credential != "" {
-		if val, ok := deviceUsage.Load(credential); ok {
+	if connInfo.Credential != "" {
+		if val, ok := deviceUsage.Load(connInfo.Credential); ok {
 			deviceUsagePtr = val.(*int64)
 		}
 	}
-	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
+	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 
 	buf := bufferPool.Get().([]byte)
 	defer bufferPool.Put(buf)
@@ -686,7 +680,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	for {
 		select {
 		case <-ctx.Done():
-			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context.Done().", connKey, connInfo.IP, isUploadName(isUpload))
+			Print("[*] Conn %s (%s) %s pipeTraffic stopped by context cancellation.", connKey, connInfo.IP, isUploadName(isUpload))
 			return
 		case <-func() <-chan time.Time {
 			if heartbeatTicker != nil {
@@ -697,8 +691,7 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			if !isUpload {
 				if err := writeWebSocketPing(tracker.Writer); err != nil {
 					Print("[!] Failed to send WebSocket Ping to %s (device %s): %v. Closing connection.", connInfo.IP, connInfo.DeviceID, err)
-					connInfo.Writer.Close()
-					return
+					return // This will trigger defer cancel()
 				}
 				atomic.StoreInt64(&connInfo.LastActive, time.Now().Unix())
 			}
@@ -715,18 +708,17 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 			_, err := io.CopyBuffer(tracker, src, buf)
 
 			if err != nil {
-				// ** FIX: Ignore timeout errors, continue loop **
+				// ** FIX: Ignore timeout errors, just continue the loop. **
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 					continue
 				}
 
 				if err == io.EOF {
-					Print("[*] Conn %s (%s) %s pipeTraffic source EOF. Closing destination.", connKey, connInfo.IP, isUploadName(isUpload))
+					Print("[*] Conn %s (%s) %s pipeTraffic source EOF.", connKey, connInfo.IP, isUploadName(isUpload))
 				} else {
-					Print("[!] Conn %s (%s) %s pipeTraffic error: %v. Closing connection.", connKey, connInfo.IP, isUploadName(isUpload), err)
+					Print("[!] Conn %s (%s) %s pipeTraffic error: %v.", connKey, connInfo.IP, isUploadName(isUpload), err)
 				}
-				connInfo.Writer.Close()
-				return
+				return // Any other error will exit and trigger defer cancel()
 			}
 		}
 	}
