@@ -31,6 +31,23 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// ==============================================================================
+// === 优化 1: 引入 sync.Pool 来复用I/O缓冲区, 旨在提升速度 ===
+// ==============================================================================
+var bufferPool sync.Pool
+
+func initBufferPool(size int) {
+	if size <= 0 {
+		size = 32 * 1024 // 默认32KB
+	}
+	bufferPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, size)
+		},
+	}
+}
+
+
 const logBufferSize = 200
 
 // RingBuffer and logging functions
@@ -233,42 +250,33 @@ func GetActiveConn(key string) (*ActiveConnInfo, bool) {
 	return nil, false
 }
 
-// ==============================================================================
-// === 1. 新增：这是功能最完整、最高效的“公告板”/“巡查手册”实现 ===
-// ==============================================================================
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
-	devices := cfg.GetDeviceIDs() // 在巡查开始前，一次性获取所有设备规则的“快照”
+	devices := cfg.GetDeviceIDs() 
 
 	activeConns.Range(func(key, value interface{}) bool {
 		connInfo := value.(*ActiveConnInfo)
 
-		// 规则：IP黑名单检查
 		if settings.EnableIPBlacklist && isIPInList(connInfo.IP, settings.IPBlacklist) {
 			Print("[-] [审计] 踢出黑名单IP %s 的连接 (设备: %s)", connInfo.IP, connInfo.DeviceID)
 			connInfo.Writer.Close()
-			return true // 继续巡查下一个
+			return true 
 		}
 
-		// 规则：如果ID认证被关闭，则后续所有与设备相关的规则都不再检查
 		if !settings.EnableDeviceIDAuth {
 			return true
 		}
 
-		// 规则：检查连接是否持有有效的设备凭证
 		if connInfo.Credential != "" {
-			// 在“快照”中查找当前连接对应的设备规则
 			if devInfo, ok := devices[connInfo.Credential]; ok {
 				
-				// 子规则 a: 设备是否被手动禁用
 				if !devInfo.Enabled {
 					Print("[-] [审计] 踢出被禁用设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 					connInfo.Writer.Close()
 					return true
 				}
 
-				// 子规则 b: 设备是否已过期
 				expiry, err := time.Parse("2006-01-02", devInfo.Expiry)
 				if err == nil && time.Now().After(expiry.Add(24*time.Hour)) {
 					Print("[-] [审计] 踢出已过期设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
@@ -276,7 +284,6 @@ func auditActiveConnections() {
 					return true
 				}
 
-				// 子规则 c: 设备流量是否已超限
 				if devInfo.LimitGB > 0 {
 					if usageVal, usageOk := deviceUsage.Load(connInfo.Credential); usageOk {
 						currentUsage := atomic.LoadInt64(usageVal.(*int64))
@@ -288,39 +295,29 @@ func auditActiveConnections() {
 					}
 				}
 			} else {
-				// 规则：如果凭证在当前设备列表中已不存在（即设备被删除）
 				Print("[-] [审计] 踢出已删除设备 %s 的连接 (IP: %s)", connInfo.DeviceID, connInfo.IP)
 				connInfo.Writer.Close()
 				return true
 			}
 		} else {
-			// 规则：对于没有凭证的连接，如果此时ID认证是开启的，则为非法连接
 			Print("[-] [审计] 踢出无凭证的非法连接 (IP: %s)", connInfo.IP)
 			connInfo.Writer.Close()
 			return true
 		}
 
-		return true // 当前连接合规，继续巡查下一个
+		return true
 	})
 }
 
-// ==============================================================================
-// === 2. 修改：移除了旧的循环事件，现在只由新的“公告板”负责巡查 ===
-// ==============================================================================
 func runPeriodicTasks() {
-	// 任务1: 每5秒保存一次设备流量使用情况
 	saveTicker := time.NewTicker(5 * time.Second)
 	go func() {
 		for range saveTicker.C { saveDeviceUsage() }
 	}()
-
-	// 任务2: 每2秒收集一次服务器状态信息
 	statusTicker := time.NewTicker(2 * time.Second)
 	go func() {
 		for range statusTicker.C { collectSystemStatus() }
 	}()
-
-	// 任务3: 每15秒启动一次“公告板”巡查
 	auditTicker := time.NewTicker(15 * time.Second)
 	go func() {
 		for range auditTicker.C { auditActiveConnections() }
@@ -522,8 +519,8 @@ func handleClient(conn net.Conn, isTLS bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true, settings.BufferSize)
-	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false, settings.BufferSize)
+	go pipeTraffic(ctx, &wg, targetConn, reader, connKey, finalDeviceID, credential, true)
+	go pipeTraffic(ctx, &wg, conn, targetConn, connKey, finalDeviceID, credential, false)
 	wg.Wait()
 	cancel()
 }
@@ -555,7 +552,10 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	return
 }
 
-func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool, bufferSize int) {
+// ==============================================================================
+// === 优化 3: 修改 pipeTraffic 以使用 sync.Pool, 旨在提升速度 ===
+// ==============================================================================
+func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey, deviceID, credential string, isUpload bool) {
 	defer wg.Done()
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok { return }
@@ -567,19 +567,18 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	}
 	tracker := &copyTracker{Writer: dst, ConnInfo: connInfo, DeviceID: deviceID, Credential: credential, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 
-	if bufferSize <= 0 {
-		bufferSize = 32 * 1024
-	}
-	buf := make([]byte, bufferSize)
+	// 从池中获取缓冲区
+	buf := bufferPool.Get().([]byte)
+	defer bufferPool.Put(buf) // 确保函数退出时归还缓冲区
 
-	n, err := io.CopyBuffer(tracker, src, buf)
-	if err != nil && err != io.EOF {
-		Print("[!] pipeTraffic error (isUpload: %v, device: %s): %v. Copied %d bytes.", isUpload, deviceID, err, n)
-	}
+	// 直接使用最高效的 io.CopyBuffer
+	io.CopyBuffer(tracker, src, buf)
+	
 	if tcpConn, ok := dst.(*net.TCPConn); ok {
 		_ = tcpConn.CloseWrite()
 	}
 }
+
 
 func extractHeaderValue(text, name string) string {
 	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
@@ -610,9 +609,6 @@ const sessionCookieName = "wstunnel_session"
 type Session struct { Username string; Expiry time.Time }
 var (sessions = make(map[string]Session); sessionsLock sync.RWMutex)
 
-// ==============================================================================
-// === 额外修复: 这是修复了无限刷新Bug的authMiddleware实现 ===
-// ==============================================================================
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isAPIRequest := strings.HasPrefix(r.URL.Path, "/api/")
@@ -662,9 +658,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := GetConfig()
-	cfg.lock.RLock()
-	storedPass, accountOk := cfg.Accounts[creds.Username]
-	cfg.lock.RUnlock()
+	accounts := cfg.GetAccounts()
+	storedPass, accountOk := accounts[creds.Username]
 	if !accountOk {
 		sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"})
 		return
@@ -900,9 +895,8 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		op, _ := reqData["old_pass"].(string)
 		nu, _ := reqData["new_user"].(string)
 		np, _ := reqData["new_pass"].(string)
-		cfg.lock.RLock()
-		storedPass, ok := cfg.Accounts[ou]
-		cfg.lock.RUnlock()
+		accounts := cfg.GetAccounts()
+		storedPass, ok := accounts[ou]
 		if !ok {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "error", "message": "原账号不存在"})
 			return
@@ -992,6 +986,12 @@ func main() {
 	cfg := GetConfig()
 	InitMetrics()
 	settings := cfg.GetSettings()
+
+	// ==============================================================================
+	// === 优化 2: 在 main 函数中初始化 buffer pool ===
+	// ==============================================================================
+	initBufferPool(settings.BufferSize)
+
 	runPeriodicTasks()
 
 	go func() {
@@ -1068,3 +1068,5 @@ func main() {
 		os.Exit(1)
 	}
 }
+
+这个版本代码 好像是我修改后的版本  但是 authMiddleware 还是有缺陷  (返回 HTML)   我使用的版本应该是这个
