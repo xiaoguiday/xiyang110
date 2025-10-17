@@ -31,6 +31,7 @@ sudo tee /usr/local/bin/wss > /dev/null <<'EOF'
 import socket, threading, select, sys, time
 
 LISTENING_ADDR = '0.0.0.0'
+# Use sys.argv to get port from command line
 LISTENING_PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 PASS = ''
 BUFLEN = 4096 * 4
@@ -69,7 +70,7 @@ class Server(threading.Thread):
             self.soc.close()
     def printLog(self, log):
         self.logLock.acquire()
-        print(log)
+        print(log, flush=True)
         self.logLock.release()
     def addConn(self, conn):
         try:
@@ -139,7 +140,7 @@ class ConnectionHandler(threading.Thread):
             self.server.removeConn(self)
     def findHeader(self, head, header):
         if isinstance(head, bytes):
-            head = head.decode('utf-8')
+            head = head.decode('utf-8', errors='ignore')
         aux = head.find(header + ': ')
         if aux == -1:
             return ''
@@ -200,16 +201,16 @@ class ConnectionHandler(threading.Thread):
 
 def main():
     print("\n:-------PythonProxy WSS-------:\n")
-    print(f"Listening addr: {LISTENING_ADDR}, port: {LISTENING_PORT}\n")
+    # Correctly use the port passed from the command line
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()
-    while True:
-        try:
+    print(f"Listening addr: {LISTENING_ADDR}, port: {LISTENING_PORT}\n")
+    try:
+        while True:
             time.sleep(2)
-        except KeyboardInterrupt:
-            print('Stopping...')
-            server.close()
-            break
+    except KeyboardInterrupt:
+        print('Stopping...')
+        server.close()
 
 if __name__ == '__main__':
     main()
@@ -227,7 +228,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wss $WSS_PORT
+ExecStart=/usr/bin/python3 /usr/local/bin/wss $WSS_PORT
 Restart=on-failure
 User=root
 
@@ -245,37 +246,73 @@ echo "----------------------------------"
 # 安装 Stunnel4 并生成证书
 # =============================
 echo "==== 安装 Stunnel4 ===="
+# 确保目录存在
 sudo mkdir -p /etc/stunnel/certs
+sudo mkdir -p /var/log/stunnel4
+
+# 生成自签名证书
 sudo openssl req -x509 -nodes -newkey rsa:2048 \
 -keyout /etc/stunnel/certs/stunnel.key \
 -out /etc/stunnel/certs/stunnel.crt \
 -days 1095 \
--subj "/CN=example.com"
-sudo sh -c 'cat /etc/stunnel/certs/stunnel.key /etc/stunnel/certs/stunnel.crt > /etc/stunnel/certs/stunnel.pem'
-sudo chmod 644 /etc/stunnel/certs/*.crt
-sudo chmod 644 /etc/stunnel/certs/*.pem
+-subj "/CN=localhost" # 使用 localhost 或 IP 更通用
 
-# Stunnel 配置
+# 合并证书和密钥
+sudo sh -c 'cat /etc/stunnel/certs/stunnel.key /etc/stunnel/certs/stunnel.crt > /etc/stunnel/certs/stunnel.pem'
+sudo chmod 640 /etc/stunnel/certs/stunnel.key
+sudo chmod 644 /etc/stunnel/certs/stunnel.crt
+sudo chmod 640 /etc/stunnel/certs/stunnel.pem
+
+# Stunnel 自定义配置文件
 sudo tee /etc/stunnel/ssh-tls.conf > /dev/null <<EOF
-pid=/var/run/stunnel.pid
-setuid=root
-setgid=root
+pid = /var/run/stunnel4/stunnel.pid
+setuid = root
+setgid = root
 client = no
-debug = 5
-output = /var/log/stunnel4/stunnel.log
+# debug = 7
+# output = /var/log/stunnel4/stunnel.log
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 
 [ssh-tls-gateway]
 accept = 0.0.0.0:$STUNNEL_PORT
 cert = /etc/stunnel/certs/stunnel.pem
-key = /etc/stunnel/certs/stunnel.pem
 connect = 127.0.0.1:22
 EOF
 
-sudo systemctl enable stunnel4
-sudo systemctl restart stunnel4
-echo "Stunnel4 安装完成，端口 $STUNNEL_PORT"
+# ==========================================================
+# --- [核心修复部分] ---
+# 告诉 Stunnel4 启用服务并使用我们的配置文件
+# ==========================================================
+sudo tee /etc/default/stunnel4 > /dev/null <<EOF
+# /etc/default/stunnel4
+#
+# Julien LEMOINE <speedblue@debian.org>
+#
+# Change to 1 to enable stunnel4
+ENABLED=1
+# Specify configuration file, relative to /etc/stunnel/
+FILES="/etc/stunnel/ssh-tls.conf"
+OPTIONS=""
+# Don't ask for DES passthrough every time you start it
+PPP_RESTART=0
+# Change to enable ppp restart.
+# REREAD=1
+EOF
+# ==========================================================
+
+# 确保 stunnel pid 目录存在且权限正确
+sudo mkdir -p /var/run/stunnel4
+sudo chown stunnel4:stunnel4 /var/run/stunnel4
+
+echo "尝试启用并重启 Stunnel4..."
+# 使用 restart 而不是 enable 然后 start，这样更直接
+sudo systemctl restart stunnel4 || (echo "Stunnel4 启动失败，请检查日志" && exit 1)
+# 启用开机自启
+sudo systemctl enable stunnel4 > /dev/null 2>&1
+
+echo "Stunnel4 安装完成并已启动，端口 $STUNNEL_PORT"
+echo "使用 'sudo systemctl status stunnel4' 查看状态"
 echo "----------------------------------"
 
 # =============================
@@ -292,7 +329,7 @@ cd /root/badvpn/badvpn-build
 cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
 make -j$(nproc)
 
-# 创建 systemd 服务（修正绑定地址为 127.0.0.1）
+# 创建 systemd 服务
 sudo tee /etc/systemd/system/udpgw.service > /dev/null <<EOF
 [Unit]
 Description=UDP Gateway (Badvpn)
@@ -314,7 +351,11 @@ sudo systemctl start udpgw
 echo "UDPGW 已安装并启动，端口: $UDPGW_PORT"
 echo "----------------------------------"
 
-echo "所有组件安装完成!"
-echo "查看 WSS 状态: sudo systemctl status wss"
-echo "查看 Stunnel4 状态: sudo systemctl status stunnel4"
-echo "查看 UDPGW 状态: sudo systemctl status udpgw"
+echo ""
+echo "🎉 所有组件安装完成!"
+echo ""
+echo "--- 服务状态检查命令 ---"
+echo "查看 WSS 状态:       sudo systemctl status wss"
+echo "查看 Stunnel4 状态:  sudo systemctl status stunnel4"
+echo "查看 UDPGW 状态:     sudo systemctl status udpgw"
+echo ""
