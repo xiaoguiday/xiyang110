@@ -232,4 +232,130 @@ ExecStart=/usr/bin/python3 /usr/local/bin/wss $WSS_PORT
 Restart=on-failure
 User=root
 
-[
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable wss
+sudo systemctl start wss
+echo "WSS 已启动，端口 $WSS_PORT"
+echo "----------------------------------"
+
+# =============================
+# 安装 Stunnel4 并生成证书
+# =============================
+echo "==== 安装 Stunnel4 ===="
+sudo mkdir -p /etc/stunnel/certs
+sudo mkdir -p /var/log/stunnel4
+sudo openssl req -x509 -nodes -newkey rsa:2048 \
+-keyout /etc/stunnel/certs/stunnel.key \
+-out /etc/stunnel/certs/stunnel.crt \
+-days 1095 \
+-subj "/CN=localhost"
+sudo sh -c 'cat /etc/stunnel/certs/stunnel.key /etc/stunnel/certs/stunnel.crt > /etc/stunnel/certs/stunnel.pem'
+sudo chmod 640 /etc/stunnel/certs/stunnel.key
+sudo chmod 644 /etc/stunnel/certs/stunnel.crt
+sudo chmod 640 /etc/stunnel/certs/stunnel.pem
+
+sudo tee /etc/stunnel/ssh-tls.conf > /dev/null <<EOF
+pid = /var/run/stunnel4/stunnel.pid
+setuid = root
+setgid = root
+client = no
+socket = l:TCP_NODELAY=1
+socket = r:TCP_NODELAY=1
+[ssh-tls-gateway]
+accept = 0.0.0.0:$STUNNEL_PORT
+cert = /etc/stunnel/certs/stunnel.pem
+connect = 127.0.0.1:22
+EOF
+
+sudo tee /etc/default/stunnel4 > /dev/null <<EOF
+ENABLED=1
+FILES="/etc/stunnel/ssh-tls.conf"
+OPTIONS=""
+PPP_RESTART=0
+EOF
+
+sudo mkdir -p /var/run/stunnel4
+sudo chown stunnel4:stunnel4 /var/run/stunnel4
+
+echo "尝试启用并重启 Stunnel4..."
+# --- [核心修改] ---
+# 移除了 || exit 1，这样即使下面的命令失败，脚本也会继续执行
+sudo systemctl restart stunnel4
+sudo systemctl enable stunnel4 > /dev/null 2>&1
+
+echo "Stunnel4 安装完成，端口 $STUNNEL_PORT"
+echo "----------------------------------"
+
+# =============================
+# 安装 UDPGW
+# =============================
+echo "==== 安装 UDPGW ===="
+if [ -d "/root/badvpn" ]; then
+    echo "/root/badvpn 已存在，跳过克隆"
+else
+    git clone https://github.com/ambrop72/badvpn.git /root/badvpn
+fi
+mkdir -p /root/badvpn/badvpn-build
+cd /root/badvpn/badvpn-build
+cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
+make -j$(nproc)
+
+# 创建 systemd 服务
+sudo tee /etc/systemd/system/udpgw.service > /dev/null <<EOF
+[Unit]
+Description=UDP Gateway (Badvpn)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/root/badvpn/badvpn-build/udpgw/badvpn-udpgw --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
+Restart=on-failure
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable udpgw
+sudo systemctl start udpgw
+echo "UDPGW 已安装并启动，端口: $UDPGW_PORT"
+echo "----------------------------------"
+
+# --- [核心修改] ---
+# 添加一个最终的状态报告，因为过程中可能出错
+echo ""
+echo "================================================="
+echo "🎉 脚本执行完毕！"
+echo ""
+echo "请务必检查以下服务的状态，确保它们都正常运行："
+echo "-------------------------------------------------"
+
+# 检查 WSS 服务
+if systemctl is-active --quiet wss; then
+    echo "✅ WSS 服务 (端口 $WSS_PORT) - 状态: 正在运行 (active)"
+else
+    echo "❌ WSS 服务 (端口 $WSS_PORT) - 状态: 启动失败 (inactive/failed)"
+fi
+
+# 检查 Stunnel4 服务
+if systemctl is-active --quiet stunnel4; then
+    echo "✅ Stunnel4 服务 (端口 $STUNNEL_PORT) - 状态: 正在运行 (active)"
+else
+    echo "❌ Stunnel4 服务 (端口 $STUNNEL_PORT) - 状态: 启动失败 (inactive/failed)"
+fi
+
+# 检查 UDPGW 服务
+if systemctl is-active --quiet udpgw; then
+    echo "✅ UDPGW 服务 (端口 $UDPGW_PORT) - 状态: 正在运行 (active)"
+else
+    echo "❌ UDPGW 服务 (端口 $UDPGW_PORT) - 状态: 启动失败 (inactive/failed)"
+fi
+echo "-------------------------------------------------"
+echo "如果发现有失败的服务，请使用 'sudo systemctl status <服务名>' 命令查看详细错误日志。"
+echo "例如: sudo systemctl status stunnel4"
+echo "================================================="
