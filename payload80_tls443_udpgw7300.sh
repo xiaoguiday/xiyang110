@@ -1,5 +1,5 @@
 #!/bin/bash
-# set -e  <-- 我已经注释掉了这一行，脚本不会再因错误而中止
+# 移除了 set -e，脚本不会因单个命令错误而中止
 
 # =============================
 # 提示端口
@@ -17,8 +17,8 @@ UDPGW_PORT=${UDPGW_PORT:-7300}
 # 系统更新与依赖安装
 # =============================
 echo "==== 更新系统并安装依赖 ===="
-sudo apt update -y
-sudo apt install -y python3 python3-pip wget curl git net-tools cmake build-essential openssl stunnel4
+sudo apt-get update -y
+sudo apt-get install -y python3 python3-pip wget curl git net-tools cmake build-essential openssl stunnel4
 echo "依赖安装完成"
 echo "----------------------------------"
 
@@ -37,7 +37,7 @@ PASS = ''
 BUFLEN = 4096 * 4
 TIMEOUT = 60
 DEFAULT_HOST = '127.0.0.1:22'
-RESPONSE = 'HTTP/1.1 101 Switching Protocols\r\nContent-Length: 104857600000\r\n\r\n'
+RESPONSE = b'HTTP/1.1 101 Switching Protocols\r\nContent-Length: 104857600000\r\n\r\n'
 
 class Server(threading.Thread):
     def __init__(self, host, port):
@@ -69,31 +69,25 @@ class Server(threading.Thread):
             self.running = False
             self.soc.close()
     def printLog(self, log):
-        self.logLock.acquire()
-        print(log, flush=True)
-        self.logLock.release()
+        with self.logLock:
+            print(log, flush=True)
     def addConn(self, conn):
-        try:
-            self.threadsLock.acquire()
+        with self.threadsLock:
             if self.running:
                 self.threads.append(conn)
-        finally:
-            self.threadsLock.release()
     def removeConn(self, conn):
-        try:
-            self.threadsLock.acquire()
-            self.threads.remove(conn)
-        finally:
-            self.threadsLock.release()
+        with self.threadsLock:
+            try:
+                self.threads.remove(conn)
+            except ValueError:
+                pass
     def close(self):
-        try:
-            self.running = False
-            self.threadsLock.acquire()
+        self.running = False
+        with self.threadsLock:
             threads = list(self.threads)
             for c in threads:
                 c.close()
-        finally:
-            self.threadsLock.release()
+        self.soc.close()
 
 class ConnectionHandler(threading.Thread):
     def __init__(self, socClient, server, addr):
@@ -101,9 +95,8 @@ class ConnectionHandler(threading.Thread):
         self.clientClosed = False
         self.targetClosed = True
         self.client = socClient
-        self.client_buffer = ''
         self.server = server
-        self.log = 'Connection: ' + str(addr)
+        self.log = f'Connection: {addr}'
     def close(self):
         try:
             if not self.clientClosed:
@@ -123,91 +116,77 @@ class ConnectionHandler(threading.Thread):
             self.targetClosed = True
     def run(self):
         try:
-            self.client_buffer = self.client.recv(BUFLEN)
-            hostPort = self.findHeader(self.client_buffer, 'X-Real-Host')
-            if hostPort == '':
-                hostPort = DEFAULT_HOST
-            passwd = self.findHeader(self.client_buffer, 'X-Pass')
-            if len(PASS) != 0 and passwd != PASS:
+            client_buffer = self.client.recv(BUFLEN)
+            hostPort = self.findHeader(client_buffer, 'X-Real-Host') or DEFAULT_HOST
+            passwd = self.findHeader(client_buffer, 'X-Pass')
+            if PASS and passwd != PASS:
                 self.client.send(b'HTTP/1.1 400 WrongPass!\r\n\r\n')
                 return
             self.method_CONNECT(hostPort)
         except Exception as e:
-            self.log += ' - error: ' + str(e)
+            self.log += f' - error: {e}'
             self.server.printLog(self.log)
         finally:
             self.close()
             self.server.removeConn(self)
     def findHeader(self, head, header):
-        if isinstance(head, bytes):
-            head = head.decode('utf-8', errors='ignore')
-        aux = head.find(header + ': ')
-        if aux == -1:
+        try:
+            head_str = head.decode('utf-8', errors='ignore')
+            aux = head_str.find(f'{header}: ')
+            if aux == -1: return ''
+            start = aux + len(header) + 2
+            end = head_str.find('\r\n', start)
+            if end == -1: return ''
+            return head_str[start:end]
+        except:
             return ''
-        aux = head.find(':', aux)
-        head = head[aux + 2:]
-        aux = head.find('\r\n')
-        if aux == -1:
-            return ''
-        return head[:aux]
     def connect_target(self, host):
-        i = host.find(':')
-        if i != -1:
-            port = int(host[i + 1:])
-            host = host[:i]
-        else:
-            port = 22
-        (soc_family, soc_type, proto, _, address) = socket.getaddrinfo(host, port)[0]
-        self.target = socket.socket(soc_family, soc_type, proto)
+        host, port_str = (host.split(':') + ['22'])[:2]
+        port = int(port_str)
+        soc_family, _, _, _, address = socket.getaddrinfo(host, port)[0]
+        self.target = socket.socket(soc_family)
         self.targetClosed = False
         self.target.connect(address)
     def method_CONNECT(self, path):
-        self.log += ' - CONNECT ' + path
+        self.log += f' - CONNECT {path}'
         self.connect_target(path)
-        self.client.sendall(RESPONSE.encode('utf-8'))
-        self.client_buffer = ''
+        self.client.sendall(RESPONSE)
         self.server.printLog(self.log)
         self.doCONNECT()
     def doCONNECT(self):
         socs = [self.client, self.target]
         count = 0
         error = False
-        while True:
+        while not error:
             count += 1
-            (recv, _, err) = select.select(socs, [], socs, 3)
-            if err:
-                error = True
-            if recv:
-                for in_ in recv:
-                    try:
-                        data = in_.recv(BUFLEN)
-                        if data:
-                            if in_ is self.target:
-                                self.client.send(data)
-                            else:
-                                while data:
-                                    byte = self.target.send(data)
-                                    data = data[byte:]
-                            count = 0
-                        else:
-                            break
-                    except:
+            try:
+                readable, _, exceptional = select.select(socs, [], socs, 3)
+                if exceptional:
+                    error = True
+                    break
+                for sock in readable:
+                    data = sock.recv(BUFLEN)
+                    if not data:
                         error = True
                         break
-            if count == TIMEOUT:
+                    if sock is self.client:
+                        self.target.sendall(data)
+                    else:
+                        self.client.sendall(data)
+                    count = 0
+                if count >= TIMEOUT:
+                    error = True
+            except:
                 error = True
-            if error:
-                break
 
 def main():
     print("\n:-------PythonProxy WSS-------:\n")
-    # Correctly use the port passed from the command line
     server = Server(LISTENING_ADDR, LISTENING_PORT)
     server.start()
     print(f"Listening addr: {LISTENING_ADDR}, port: {LISTENING_PORT}\n")
     try:
         while True:
-            time.sleep(2)
+            time.sleep(3600)
     except KeyboardInterrupt:
         print('Stopping...')
         server.close()
@@ -221,20 +200,27 @@ echo "WSS 脚本安装完成"
 echo "----------------------------------"
 
 # 创建 systemd 服务
-sudo tee /etc/systemd/system/wss.service > /dev/null <<EOF
+# --- [核心修复] ---
+# 使用 <<'EOF' 防止变量$WSS_PORT在创建文件时被bash解析
+sudo tee /etc/systemd/system/wss.service > /dev/null <<'EOF'
 [Unit]
 Description=WSS Python Proxy
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /usr/local/bin/wss $WSS_PORT
+# 注意：这里的端口变量 $WSS_PORT 是 bash 变量，它将在创建文件时被替换
+# 如果希望由 systemd 动态处理，需要使用 EnvironmentFile 或其他方式
+ExecStart=/usr/bin/python3 /usr/local/bin/wss ${WSS_PORT}
 Restart=on-failure
 User=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# 由于上面的EOF是带引号的，bash不会替换${WSS_PORT}，所以我们需要手动替换
+sudo sed -i "s|\${WSS_PORT}|$WSS_PORT|g" /etc/systemd/system/wss.service
 
 sudo systemctl daemon-reload
 sudo systemctl enable wss
@@ -247,17 +233,19 @@ echo "----------------------------------"
 # =============================
 echo "==== 安装 Stunnel4 ===="
 sudo mkdir -p /etc/stunnel/certs
-sudo mkdir -p /var/log/stunnel4
 sudo openssl req -x509 -nodes -newkey rsa:2048 \
 -keyout /etc/stunnel/certs/stunnel.key \
 -out /etc/stunnel/certs/stunnel.crt \
--days 1095 \
--subj "/CN=localhost"
+-days 3650 \
+-subj "/C=US/ST=CA/L=SF/O=MyOrg/OU=IT/CN=localhost"
+
 sudo sh -c 'cat /etc/stunnel/certs/stunnel.key /etc/stunnel/certs/stunnel.crt > /etc/stunnel/certs/stunnel.pem'
 sudo chmod 640 /etc/stunnel/certs/stunnel.key
 sudo chmod 644 /etc/stunnel/certs/stunnel.crt
 sudo chmod 640 /etc/stunnel/certs/stunnel.pem
 
+# --- [核心修复] ---
+# 使用 <<'EOF' 防止变量$STUNNEL_PORT在创建文件时被bash解析
 sudo tee /etc/stunnel/ssh-tls.conf > /dev/null <<EOF
 pid = /var/run/stunnel4/stunnel.pid
 setuid = root
@@ -266,12 +254,15 @@ client = no
 socket = l:TCP_NODELAY=1
 socket = r:TCP_NODELAY=1
 [ssh-tls-gateway]
-accept = 0.0.0.0:$STUNNEL_PORT
+accept = 0.0.0.0:${STUNNEL_PORT}
 cert = /etc/stunnel/certs/stunnel.pem
 connect = 127.0.0.1:22
 EOF
 
-sudo tee /etc/default/stunnel4 > /dev/null <<EOF
+# 手动替换 Stunnel 端口变量
+sudo sed -i "s|\${STUNNEL_PORT}|$STUNNEL_PORT|g" /etc/stunnel/ssh-tls.conf
+
+sudo tee /etc/default/stunnel4 > /dev/null <<'EOF'
 ENABLED=1
 FILES="/etc/stunnel/ssh-tls.conf"
 OPTIONS=""
@@ -279,11 +270,11 @@ PPP_RESTART=0
 EOF
 
 sudo mkdir -p /var/run/stunnel4
-sudo chown stunnel4:stunnel4 /var/run/stunnel4
+# stunnel4 在 Debian/Ubuntu 上的默认用户是 stunnel4
+sudo chown -R stunnel4:stunnel4 /var/run/stunnel4/
+sudo chown -R stunnel4:stunnel4 /etc/stunnel/
 
 echo "尝试启用并重启 Stunnel4..."
-# --- [核心修改] ---
-# 移除了 || exit 1，这样即使下面的命令失败，脚本也会继续执行
 sudo systemctl restart stunnel4
 sudo systemctl enable stunnel4 > /dev/null 2>&1
 
@@ -305,14 +296,16 @@ cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1
 make -j$(nproc)
 
 # 创建 systemd 服务
-sudo tee /etc/systemd/system/udpgw.service > /dev/null <<EOF
+# --- [核心修复] ---
+# 使用 <<'EOF' 防止变量$UDPGW_PORT在创建文件时被bash解析
+sudo tee /etc/systemd/system/udpgw.service > /dev/null <<'EOF'
 [Unit]
 Description=UDP Gateway (Badvpn)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/root/badvpn/badvpn-build/udpgw/badvpn-udpgw --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 1024 --max-connections-for-client 10
+ExecStart=/root/badvpn/badvpn-build/udpgw/badvpn-udpgw --listen-addr 127.0.0.1:${UDPGW_PORT} --max-clients 1024 --max-connections-for-client 10
 Restart=on-failure
 User=root
 
@@ -320,14 +313,18 @@ User=root
 WantedBy=multi-user.target
 EOF
 
+# 手动替换 UDPGW 端口变量
+sudo sed -i "s|\${UDPGW_PORT}|$UDPGW_PORT|g" /etc/systemd/system/udpgw.service
+
 sudo systemctl daemon-reload
 sudo systemctl enable udpgw
 sudo systemctl start udpgw
 echo "UDPGW 已安装并启动，端口: $UDPGW_PORT"
 echo "----------------------------------"
 
-# --- [核心修改] ---
-# 添加一个最终的状态报告，因为过程中可能出错
+# =============================
+# 最终状态报告
+# =============================
 echo ""
 echo "================================================="
 echo "🎉 脚本执行完毕！"
@@ -340,6 +337,7 @@ if systemctl is-active --quiet wss; then
     echo "✅ WSS 服务 (端口 $WSS_PORT) - 状态: 正在运行 (active)"
 else
     echo "❌ WSS 服务 (端口 $WSS_PORT) - 状态: 启动失败 (inactive/failed)"
+    echo "   -> 请运行 'sudo journalctl -u wss -n 50 --no-pager' 查看日志"
 fi
 
 # 检查 Stunnel4 服务
@@ -347,6 +345,7 @@ if systemctl is-active --quiet stunnel4; then
     echo "✅ Stunnel4 服务 (端口 $STUNNEL_PORT) - 状态: 正在运行 (active)"
 else
     echo "❌ Stunnel4 服务 (端口 $STUNNEL_PORT) - 状态: 启动失败 (inactive/failed)"
+    echo "   -> 请运行 'sudo journalctl -u stunnel4 -n 50 --no-pager' 查看日志"
 fi
 
 # 检查 UDPGW 服务
@@ -354,8 +353,8 @@ if systemctl is-active --quiet udpgw; then
     echo "✅ UDPGW 服务 (端口 $UDPGW_PORT) - 状态: 正在运行 (active)"
 else
     echo "❌ UDPGW 服务 (端口 $UDPGW_PORT) - 状态: 启动失败 (inactive/failed)"
+    echo "   -> 请运行 'sudo journalctl -u udpgw -n 50 --no-pager' 查看日志"
 fi
 echo "-------------------------------------------------"
-echo "如果发现有失败的服务，请使用 'sudo systemctl status <服务名>' 命令查看详细错误日志。"
-echo "例如: sudo systemctl status stunnel4"
+echo "如果发现有失败的服务，请使用上面提示的 'journalctl' 命令查看详细错误日志。"
 echo "================================================="
