@@ -571,6 +571,8 @@ func (p *Proxy) handleConn(client net.Conn) {
 	client.SetReadDeadline(time.Time{})
 	if err != nil {
 		if err != io.EOF && !strings.Contains(err.Error(), "timed out") {
+			// reader.Peek may return this on timeout, not a critical error for sniffing
+		} else if err != io.EOF {
 			Print("[-] Conn %s failed to peek initial byte: %v", connKey, err)
 		}
 		return
@@ -1480,4 +1482,4 @@ func compareStringSlices(a, b []string) bool {
 		}
 	}
 	return true
-}									
+}
