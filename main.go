@@ -384,16 +384,6 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 		p.handleDirectConnection(conn, reader)
 	}
 }
-```**请注意**：在上面的修正代码中，我先用 `reader.Peek` 来探测错误，如果成功，再用一次 `reader.Peek` 获取数据。这是因为第一次 `Peek` 成功后，数据仍在缓冲区中，第二次 `Peek` 会立即返回相同的数据而不会产生新的IO或错误。
-
-### **重要：认证逻辑变更提醒**
-
-在您重构后的代码中，我注意到一个非常重要的逻辑变更，这很可能是您修复超时问题后遇到的**下一个问题**。
-
-*   **旧代码**: 认证凭证是通过 `Sec-WebSocket-Key` 这个标准的 WebSocket 头来传递的。
-*   **新代码**: 在 `handleHTTPPayloadConnection` 函数中，认证凭证改为了通过一个自定义的 `X-Device-ID` 头来传递。
-
-```go
 // in handleHTTPPayloadConnection
 // ############ 修正点 2: 使用自定义 Header "X-Device-ID" 进行认证 ############
 credential := req.Header.Get("X-Device-ID")
