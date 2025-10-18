@@ -1,4 +1,4 @@
-// wstunnel_final_merged_v7_CORRECTED.go
+// wstunnel_final_merged_v7_CORRECTED_FIXED.go
 package main
 
 import (
@@ -123,6 +123,44 @@ type copyTracker struct {
 	DeviceUsagePtr *int64
 }
 
+// [!!] FIX 1: Added the missing Write method for copyTracker.
+// This method intercepts data writes to perform traffic accounting.
+// Without this, all traffic statistics would remain at zero.
+func (t *copyTracker) Write(p []byte) (n int, err error) {
+	n, err = t.Writer.Write(p) // Write data to the underlying connection
+
+	// --- Begin Traffic Accounting ---
+	bytesWritten := int64(n)
+
+	// Update per-connection stats
+	if t.IsUpload {
+		atomic.AddInt64(&t.ConnInfo.BytesSent, bytesWritten)
+	} else {
+		atomic.AddInt64(&t.ConnInfo.BytesReceived, bytesWritten)
+	}
+
+	// Update global stats
+	// Note: globalBytesReceived is not tracked here, as this tracker only sees outgoing data.
+	// To track both, you would need to adjust the logic. For simplicity, we track global sent bytes.
+	if t.IsUpload {
+		atomic.AddInt64(&globalBytesSent, bytesWritten)
+	} else {
+		atomic.AddInt64(&globalBytesReceived, bytesWritten)
+	}
+
+	// If associated with a device, update its total usage
+	if t.DeviceUsagePtr != nil {
+		atomic.AddInt64(t.DeviceUsagePtr, bytesWritten)
+	}
+
+	// Update the last active timestamp for the connection
+	atomic.StoreInt64(&t.ConnInfo.LastActive, time.Now().Unix())
+	// --- End Traffic Accounting ---
+
+	return n, err
+}
+
+
 type Proxy struct {
 	cfg    *Config
 	sem    chan struct{}
@@ -150,7 +188,6 @@ type APIConnectionResponse struct {
 	LastActive   string `json:"last_active"`
 	ConnKey      string `json:"conn_key"`
 }
-
 // ==========================================================
 // --- 全局变量与初始化 (Globals & Initialization) ---
 // ==========================================================
@@ -292,8 +329,6 @@ func InitMetrics() {
 		deviceUsage.Store(id, &newUsage)
 	}
 }
-
-
 // ==========================================================
 // --- 配置管理 (Config Management with Auto-Migration) ---
 // ==========================================================
@@ -699,12 +734,15 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, req *http.Request, info *Act
 	}
 	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
 	ua := req.UserAgent()
-
-	if settings.UAKeywordWS != "" && strings.Contains(ua, ua) {
+    
+	// [!!] FIX 2: Corrected the User-Agent check.
+	// The original code was `strings.Contains(ua, ua)`, which is always true.
+	// It's now correctly checking against the keywords from the settings.
+	if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
 		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
 		info.Status = "活跃"
 		p.forwardConnection(conn, info, targetAddr, body)
-	} else if settings.UAKeywordProbe != "" && strings.Contains(ua, ua) {
+	} else if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
 		Print("[*] Received probe from %s for device '%s'. Responding OK.", remoteIP, info.DeviceID)
 		conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 	} else {
@@ -712,7 +750,6 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, req *http.Request, info *Act
 		sendHTTPErrorAndClose(conn, 403, "Forbidden", "Forbidden")
 	}
 }
-
 // ==========================================================
 // --- 数据转发逻辑 (Traffic Forwarding Logic) ---
 // ==========================================================
