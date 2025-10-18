@@ -878,3 +878,4 @@ func main() {
 func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText, body string) {
 	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", statusCode, statusText, len(body), body)
 	_, _ = conn
+}
