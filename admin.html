@@ -11,20 +11,22 @@
         .page-grid > .card, .right-panel-wrapper > .card { margin-top: 12px; }
         table{width:100%;border-collapse:collapse;font-size:14px;}
         th,td{padding:10px 12px;border-bottom:1px solid #f1f5f9;word-wrap:break-word; text-align: center; vertical-align: middle;}
+        #device-list td { white-space: nowrap; }
         th{white-space:nowrap}thead th{position:sticky;top:0;background:#f8fafc;border-bottom:2px solid #eef2f7;font-weight:700}
         tr:last-child td {border-bottom: none;}
         td:first-child, th:first-child { text-align: left; }
         td:nth-child(2) { text-align: left; }
+        td:last-child, th:last-child { text-align: center; }
         .table-container,.device-list-container{overflow-x:auto;border-radius:8px;border:1px solid #e6eef8;margin-top:8px}.table-container{max-height:calc(100vh - 400px)}.device-list-container{flex-grow: 1;}.btn{border:0;padding:8px 12px;border-radius:6px;cursor:pointer;font-weight:700;color:white;transition:opacity .2s}.btn:hover{opacity:0.85}.btn-sm{padding:5px 8px; font-size:12px;}.btn.primary{background:#2563eb}.btn.secondary{background:#10b981}.btn.danger{background:#dc2626}.btn.info{background:#0ea5e9}.btn.warning{background:#f59e0b}.status-pill{display:inline-block;padding:4px 10px;border-radius:999px;font-weight:600;font-size:12px}
         .status-normal, .status-活跃 {background:#e6ffed;color:#065f46}
         .status-banned {background:#fecaca;color:#991b1b}
         .status-expired {background:#feecdc;color:#9a3412}
-        .status-握手, .status-TLS握手, .status-HTTP握手 {background:#fffbeb;color:#b45309}
+        .status-握手 {background:#fffbeb;color:#b45309}
         .navbar{display:flex;gap:8px;align-items:center;padding:8px 0;flex-wrap:wrap;border-bottom: 1px solid #e2e8f0;}.navbar a{padding:8px 12px;border-radius:8px;text-decoration:none;font-weight:700;color:#0f172a;transition:background-color .2s, color .2s}.navbar a.active{background:#eef2ff; color:#2563eb;}.navbar a:not(.active):hover{background-color:#f8fafc;}.form-row{display:flex;gap:10px;align-items:center;margin-top:8px;flex-wrap:wrap}.form-row label{font-weight:600}
         input[type="text"],input[type="password"],input[type="number"],select,textarea{font-size:14px;padding:8px;border:1px solid #e2e8f0;border-radius:6px;box-sizing:border-box}
         input[type="text"],input[type="password"],input[type="number"],select{height:32px; padding: 4px 8px;}
-        textarea { width: 100%; resize: vertical; font-family: inherit; }
-        .status-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:12px 0}.status-card{background:#fff;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(20,30,60,0.05);border:1px solid #eef2f7;display:flex;flex-direction:column;gap:4px}.status-card span{font-size:14px;color:#64748b}.status-card strong{font-size:16px;color:#0f172a;font-weight:600}.status-card small{font-size:12px;color:#94a3b8}.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px;margin-top:12px}.settings-group{border:1px solid #eef2f7;border-radius:8px;padding:12px 16px}.settings-group h3{margin-top:0;font-size:16px;border-bottom:1px solid #eef2f7;padding-bottom:10px;margin-bottom:16px}.settings-group .form-row{margin-top:12px}.settings-group .form-row label{min-width:140px;text-align:right;font-weight:normal;color:#334155}.settings-group .form-row input[type=text]{flex-grow:1; width: auto; max-width: none; }.settings-group .form-row.full-width input, .settings-group .form-row.full-width textarea{width:100%;}
+        textarea { width: 100%; resize: vertical; }
+        .status-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;padding:12px 0}.status-card{background:#fff;border-radius:8px;padding:12px 16px;box-shadow:0 4px 12px rgba(20,30,60,0.05);border:1px solid #eef2f7;display:flex;flex-direction:column;gap:4px}.status-card span{font-size:14px;color:#64748b}.status-card strong{font-size:16px;color:#0f172a;font-weight:600}.status-card small{font-size:12px;color:#94a3b8}.settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:18px;margin-top:12px}.settings-group{border:1px solid #eef2f7;border-radius:8px;padding:12px 16px}.settings-group h3{margin-top:0;font-size:16px;border-bottom:1px solid #eef2f7;padding-bottom:10px;margin-bottom:16px}.settings-group .form-row{margin-top:12px}.settings-group .form-row label{min-width:140px;text-align:right;font-weight:normal;color:#334155}.settings-group .form-row input[type=text]{flex-grow:1; width: auto; max-width: none; }.settings-group .form-row.full-width input{width:100%;}
         .toggle-switch{position:relative;display:inline-block;width:50px;height:28px}.toggle-switch input{opacity:0;width:0;height:0}.slider{position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background-color:#ccc;transition:.4s;border-radius:28px}.slider:before{position:absolute;content:"";height:20px;width:20px;left:4px;bottom:4px;background-color:white;transition:.4s;border-radius:50%}input:checked+.slider{background-color:#2563eb}input:checked+.slider:before{transform:translateX(22px)}
         .page-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(450px, 1fr); gap: 12px; align-items: stretch; }
         .page-grid > .card { display: flex; flex-direction: column; height: calc(100vh - 200px); min-width: 0; }
@@ -41,6 +43,7 @@
         .page-grid > .card, .right-panel-wrapper { height: calc(100vh - 200px); }
         .right-panel-wrapper .card:last-child { margin-top: 12px; flex-grow: 1; display: flex; flex-direction: column; }
         .right-panel-wrapper .card:last-child .device-list-container { flex-grow: 1; }
+        .hidden-span { visibility: hidden; position: absolute; }
         
         @media (max-width: 1024px) {
             .page-grid { grid-template-columns: 1fr; } 
@@ -78,20 +81,112 @@
 </div>
 
 <script>
-    const gid = id => document.getElementById(id);
-    const contentArea = gid('content-area');
+    const gid = id => document.getElementById(id); const contentArea = gid('content-area');
     let appState = { devices: {}, usage: {}, settings: null, connections: [], logs: [], currentUser: '' };
     let refreshInterval;
 
-    function showToast(message, type = 'info', duration = 3000) { const container = gid('toast-container'); const toast = document.createElement('div'); toast.className = `toast ${type}`; toast.textContent = message; container.appendChild(toast); setTimeout(() => toast.classList.add('show'), 10); setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 500); }, duration); }
-    function showConfirm(title, message, onConfirm) { const container = gid('modal-container'); container.innerHTML = `<div class="modal-overlay"><div class="modal-content"><h3>${title}</h3><p>${message}</p><div class="modal-buttons"><button class="btn secondary" id="modal-cancel">取消</button><button class="btn danger" id="modal-confirm">确认</button></div></div></div>`; const overlay = container.querySelector('.modal-overlay'); setTimeout(() => overlay.classList.add('show'), 10); gid('modal-confirm').onclick = () => { onConfirm(); overlay.classList.remove('show'); setTimeout(() => container.innerHTML = '', 300); }; gid('modal-cancel').onclick = () => { overlay.classList.remove('show'); setTimeout(() => container.innerHTML = '', 300); }; }
-    async function apiRequest(url, options = {}) { try { const response = await fetch(url, options); if (response.status === 401) { if (url !== '/logout') { window.location.reload(); } throw new Error(`Unauthorized`); } if (url === '/logout') return { status: 'ok' }; const contentType = response.headers.get("content-type"); if (contentType && contentType.indexOf("application/json") !== -1) { const data = await response.json(); if (!response.ok) { throw new Error(data.message || `HTTP error! status: ${response.status}`); } return data; } else { if (!response.ok) { throw new Error(`非JSON响应，状态码: ${response.status}`); } console.error(`URL ${url} 返回了非JSON内容，可能是认证问题。`); window.location.reload(); return null; } } catch (error) { console.error(`API request to ${url} failed:`, error); if (options.method === 'POST') showToast(`操作失败: ${error.message}`, 'error'); return null; } }
+    function showToast(message, type = 'info', duration = 3000) {
+        const container = gid('toast-container');
+        const toast = document.createElement('div');
+        toast.className = `toast ${type}`;
+        toast.textContent = message;
+        container.appendChild(toast);
+        setTimeout(() => toast.classList.add('show'), 10);
+        setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 500); }, duration);
+    }
+
+    function showConfirm(title, message, onConfirm) {
+        const container = gid('modal-container');
+        container.innerHTML = `
+            <div class="modal-overlay">
+                <div class="modal-content">
+                    <h3>${title}</h3>
+                    <p>${message}</p>
+                    <div class="modal-buttons">
+                        <button class="btn secondary" id="modal-cancel">取消</button>
+                        <button class="btn danger" id="modal-confirm">确认</button>
+                    </div>
+                </div>
+            </div>`;
+        const overlay = container.querySelector('.modal-overlay');
+        setTimeout(() => overlay.classList.add('show'), 10);
+        gid('modal-confirm').onclick = () => { onConfirm(); overlay.classList.remove('show'); setTimeout(() => container.innerHTML = '', 300); };
+        gid('modal-cancel').onclick = () => { overlay.classList.remove('show'); setTimeout(() => container.innerHTML = '', 300); };
+    }
+
+    async function apiRequest(url, options = {}) {
+        try {
+            const response = await fetch(url, options);
+            if (response.status === 401) { if (url !== '/logout') { window.location.reload(); } throw new Error(`Unauthorized`); }
+            if (url === '/logout') return {status: 'ok'}; 
+            
+            const contentType = response.headers.get("content-type");
+            if (contentType && contentType.indexOf("application/json") !== -1) {
+                const data = await response.json();
+                if (!response.ok) { throw new Error(data.message || `HTTP error! status: ${response.status}`); }
+                return data;
+            } else {
+                if (!response.ok) {
+                     throw new Error(`非JSON响应，状态码: ${response.status}`);
+                }
+                console.error(`URL ${url} 返回了非JSON内容，可能是认证问题。`);
+                window.location.reload();
+                return null;
+            }
+        } catch (error) {
+            console.error(`API request to ${url} failed:`, error);
+            if (options.method === 'POST') showToast(`操作失败: ${error.message}`, 'error');
+            return null;
+        }
+    }
+
     const get = (url) => apiRequest(url);
     const post = (url, data) => apiRequest(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
-    function formatBytesJS(b, d = 2) { if (!isFinite(b) || b <= 0) return "0 B"; const k = 1024, s = ["B", "KB", "MB", "GB", "TB"], i = Math.floor(Math.log(b) / Math.log(k)); return parseFloat((b / Math.pow(k, i)).toFixed(d)) + " " + s[i]; }
     
-    function renderConnectionsTable() { const t = gid('connections-body'); if (!t) return; let h = ''; if (appState.connections.length === 0) { h = '<tr><td colspan="11" style="text-align:center;">暂无连接</td></tr>'; } else { appState.connections.forEach(c => { h += `<tr><td style="text-align:left;">${c.device_id}</td><td><span class="status-pill status-${c.status}">${c.status}</span></td><td>${c.sent_str}</td><td>${c.rcvd_str}</td><td>${c.speed_str}</td><td>${c.remaining_str}</td><td>${c.expiry}</td><td>${c.ip}</td><td>${c.first_conn}</td><td>${c.last_active}</td><td><button class="btn danger btn-sm" onclick="kickConnection('${c.conn_key}')">踢掉</button></td></tr>`; }); } t.innerHTML = h; filterConnectionsTable(); }
-    function renderStatusPage() { contentArea.innerHTML = `<div class="card"><h2>连接状态</h2><div class="form-row"><input id="search_input_conn" type="text" placeholder="模糊搜索..." onkeyup="filterConnectionsTable()"></div><div class="table-container"><table><thead><tr><th style="text-align:left;">设备名称</th><th>状态</th><th>上传</th><th>下载</th><th>当前速率</th><th>剩余流量</th><th>有效期</th><th>IP地址</th><th>首次连接</th><th>上次活动</th><th>操作</th></tr></thead><tbody id="connections-body"></tbody></table></div></div>`; renderConnectionsTable(); }
+    function formatBytesJS(b, d = 2) {
+        if (!isFinite(b) || b <= 0) return "0 B";
+        const k = 1024, s = ["B", "KB", "MB", "GB", "TB"], i = Math.floor(Math.log(b) / Math.log(k));
+        return parseFloat((b / Math.pow(k, i)).toFixed(d)) + " " + s[i];
+    }
+    
+    function renderConnectionsTable() { 
+        const t = gid('connections-body'); 
+        if (!t) return; 
+        let h = ''; 
+        if (appState.connections.length === 0) { 
+            h = '<tr><td colspan="11" style="text-align:center;">暂无连接</td></tr>'; 
+        } else { 
+            appState.connections.forEach(c => {
+                h += `<tr>
+                    <td style="text-align:left;">${c.device_id}</td>
+                    <td><span class="status-pill status-${c.status}">${c.status}</span></td>
+                    <td>${c.sent_str}</td>
+                    <td>${c.rcvd_str}</td>
+                    <td>${c.speed_str}</td>
+                    <td>${c.remaining_str}</td>
+                    <td>${c.expiry}</td>
+                    <td>${c.ip}</td>
+                    <td>${c.first_conn}</td>
+                    <td>${c.last_active}</td>
+                    <td><button class="btn warning btn-sm" onclick="banUserFromConn('${c.conn_key}', '${c.device_id}')">禁止</button></td>
+                </tr>`; 
+            }); 
+        } 
+        t.innerHTML = h; 
+        filterConnectionsTable(); 
+    }
+    function renderStatusPage() { 
+        contentArea.innerHTML = `<div class="card"><h2>连接状态</h2><div class="form-row"><input id="search_input_conn" type="text" placeholder="模糊搜索..." onkeyup="filterConnectionsTable()"></div>
+        <div class="table-container"><table id="connections"><thead><tr>
+        <th style="text-align:left; padding-left: 12px;">客户端ID</th><th class="center-align">状态</th>
+        <th class="center-align">上传<span class="hidden-span">0000.00 GB</span></th>
+        <th class="center-align">下载<span class="hidden-span">0000.00 GB</span></th>
+        <th class="center-align">当前速率<span class="hidden-span">0000.00 MB/s</span></th>
+        <th class="center-align">剩余流量<span class="hidden-span">0000.00 GB</span></th>
+        <th class="center-align">有效期</th><th class="center-align">IP地址</th><th class="center-align">首次连接</th><th class="center-align">上次活动</th><th class="center-align">操作</th>
+        </tr></thead><tbody id="connections-body"></tbody></table></div></div>`; 
+        renderConnectionsTable(); 
+    }
     
     function renderDevicePage() {
         if (!appState.settings) { contentArea.innerHTML = `<div class="card">正在加载初始数据...</div>`; return; }
@@ -104,7 +199,7 @@
                 </div>
                 <div class="device-list-container">
                     <table id="device-list">
-                        <thead><tr><th>状态</th><th style="text-align:left;">名称</th><th>设备密钥 (ID)</th><th>有效期</th><th>已用/总量</th><th>最大连接</th><th>操作</th></tr></thead>
+                        <thead><tr><th style="width: 80px;">状态</th><th style="width: 120px;">名称</th><th style="width:120px;">设备密钥</th><th style="width: 110px;">有效期</th><th style="width: 120px;">已用/总量</th><th style="width: 80px;">连接数</th><th style="width: 70px;">操作</th></tr></thead>
                         <tbody></tbody>
                     </table>
                 </div>
@@ -112,32 +207,32 @@
             <div class="right-panel-wrapper">
                 <div class="card form-panel">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                        <h3 style="margin:0;">编辑/创建设备</h3>
+                        <h3 style="margin:0;">编辑/创建账号</h3>
                         <div style="display: flex; align-items: center; gap: 8px;">
                             <label class="toggle-switch"><input type="checkbox" id="device-auth-toggle" ${appState.settings.enable_device_id_auth ? 'checked' : ''} onchange="toggleDeviceAuth()"><span class="slider"></span></label>
                             <span id="device-auth-status-text">${appState.settings.enable_device_id_auth ? "认证开启" : "已关闭"}</span>
                         </div>
                     </div>
-                    <!-- [FIX] Removed separate device_id input, sec_ws_key is the ID now -->
-                    <div class="form-row"><label>设备名称:</label><input id="friendly_name" type="text" placeholder="必填, 方便记忆的别名"></div>
-                    <div class="form-row"><label>设备密钥 (ID):</label><input id="sec_ws_key" type="text" placeholder="必填, 客户端认证凭证"></div>
+                    <input type="hidden" id="current_editing_key">
+                    <div class="form-row"><label>设备名称:</label><input id="device_name" type="text" placeholder="必填, e.g., user01"></div>
+                    <div class="form-row"><label>设备密钥:</label><input id="sec_ws_key" type="text" placeholder="必填, 点击一键填充生成"></div>
                     <div class="form-row"><label>有效期:</label><input id="expiry" type="text" placeholder="YYYY-MM-DD, 必填"></div>
-                    <div class="form-row"><label>流量 (GB):</label><input id="limit_gb" type="number" placeholder="0为无限"></div>
+                    <div class="form-row"><label>流量 (GB):</label><input id="limit_gb" type="text" placeholder="0为无限"></div>
                     <div class="form-row"><label>最大连接数:</label><input id="max_sessions" type="number" value="1" style="flex-grow: 0; width: 80px;"></div>
                     
-                    <div class="action-buttons" style="margin-top: 20px; justify-content: center;">
+                    <div class="action-buttons" style="padding-left: 0; margin-top: 20px; justify-content: center;">
                         <button class="btn info" onclick="generateNewDevice()">一键填充</button>
                         <button class="btn secondary" onclick="resetTraffic()">重置流量</button>
-                        <button class="btn primary" onclick="saveDevice()">保存设备</button>
+                        <button class="btn primary" onclick="addID()">保存设置</button>
                     </div>
-                    <div class="action-buttons" style="margin-top: 10px; justify-content: flex-end;">
+                    <div class="action-buttons" style="padding-left: 0; margin-top: 10px; justify-content: flex-end;">
                         <div id="ban-unban-button-container"></div>
                     </div>
                 </div>
                 <div class="card">
-                    <h3 style="margin-top:0;">已禁用设备</h3>
+                    <h3 style="margin-top:0;">封禁列表</h3>
                     <div class="device-list-container" style="max-height: 300px;">
-                        <table id="disabled-list-table">
+                        <table id="blacklist-table">
                             <thead><tr><th style="text-align:left;">名称</th><th>操作</th></tr></thead>
                             <tbody></tbody>
                         </table>
@@ -146,28 +241,29 @@
             </div>
         </div>`;
         renderDevicesTable();
-        renderDisabledDevicesTable();
+        renderBlacklistTable();
     }
 
     function renderDevicesTable() {
         const tbody = gid('device-list')?.querySelector('tbody');
         if (!tbody) return;
         let tableRowsHtml = '';
-        Object.entries(appState.devices).sort((a, b) => a[1].friendly_name.localeCompare(b[1].friendly_name)).forEach(([key, info]) => {
-            if (!info.enabled) return; // Skip disabled devices
+        Object.entries(appState.devices).sort((a, b) => (a[1].friendly_name || '').localeCompare(b[1].friendly_name || '')).forEach(([key, info]) => {
+            const name = info.friendly_name;
             const limit = info.limit_gb > 0 ? `${info.limit_gb} GB` : '无限';
             const used = appState.usage[key] || 0;
-            const isExpired = new Date() > new Date(info.expiry);
+            const isBanned = !info.enabled;
+            const isExpired = new Date(info.expiry) < new Date();
             let status = 'normal'; let statusText = '正常';
-            if (isExpired) { status = 'expired'; statusText = '过期'; }
+            if (isBanned) { status = 'banned'; statusText = '禁止'; }
+            else if (isExpired) { status = 'expired'; statusText = '过期'; }
             
-            // [FIX] Added a column for the key and corrected the copy-to-clipboard call
-            tableRowsHtml += `<tr id="device-row-${key}" onclick="fillDeviceForm('${key}')">
+            tableRowsHtml += `<tr id="device-row-${key}" onclick="fillDeviceForm('${key}')" data-sec-ws-key="${key}">
                 <td><span class="status-pill status-${status}">${statusText}</span></td>
-                <td style="text-align:left;">${info.friendly_name}</td>
-                <td style="font-family: monospace; font-size: 12px; max-width: 150px; overflow: hidden; text-overflow: ellipsis;" title="${key}">${key} <button class="btn info btn-sm" style="margin-left:5px;" onclick="event.stopPropagation(); copyToClipboard('${key}')">复制</button></td>
+                <td style="text-align:left;">${name}</td>
+                <td><button class="btn info btn-sm" onclick="event.stopPropagation(); copyToClipboard('${key}')">复制Key</button></td>
                 <td>${info.expiry}</td>
-                <td>${formatBytesJS(used)} / ${limit}</td>
+                <td class="used-traffic">${formatBytesJS(used)} / ${limit}</td>
                 <td>${(info.max_sessions || 1) == 0 ? "不限制" : (info.max_sessions || 1)}</td>
                 <td><button class="btn danger btn-sm" onclick="event.stopPropagation(); deleteDeviceWithConfirm('${key}')">删除</button></td>
             </tr>`;
@@ -176,141 +272,418 @@
         filterDevicesTable();
     }
 
-    function renderDisabledDevicesTable(){ const tbody = gid('disabled-list-table')?.querySelector('tbody'); if(!tbody) return; let h = ''; const disabledDevices = Object.entries(appState.devices).filter(([key, info]) => !info.enabled); if(disabledDevices.length === 0) { h = '<tr><td colspan="2" style="text-align:center;">暂无禁用设备</td></tr>'; } else { disabledDevices.forEach(([key, info]) => { h += `<tr><td style="text-align:left;">${info.friendly_name}</td><td style="text-align:center;"><button class="btn secondary btn-sm" onclick="setDeviceStatus('${key}', true)">解除</button></td></tr>`; }); } tbody.innerHTML = h; }
-    function renderAccountPage() { contentArea.innerHTML = `<div class="card"><h2>面板账号设置</h2><div class="form-row"><label style="flex-basis: 80px; text-align: left;">原账号:</label><input id="old_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">原密码:</label><input id="old_pass" type="password"></div><div class="form-row"><label style="flex-basis: 80px; text-align: left;">新账号:</label><input id="new_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">新密码:</label><input id="new_pass" type="password"><button class="btn secondary" onclick="updateAccount()">保存</button></div></div><div class="card"><h2>创建SSH隧道用户</h2><p style="font-size:13px;color:#64748b;">此功能会创建或更新一个系统用户，并修改 <b>/etc/ssh/sshd_config</b> 文件以应用安全限制。请确保程序以 root 权限运行。</p><div class="form-row"><label>SSH 用户名:</label><input id="ssh_user" type="text"><label>SSH 密码:</label><input id="ssh_pass" type="password"></div><div class="form-row" style="margin-top: 15px; gap: 15px;"><button class="btn secondary" onclick="manageSshUser('create')">创建/更新用户</button><button class="btn danger" onclick="manageSshUser('delete')">删除用户</button></div></div>`; }
+    function renderBlacklistTable(){
+        const tbody = gid('blacklist-table')?.querySelector('tbody');
+        if(!tbody) return;
+        
+        let h = '';
+        const bannedDevices = Object.entries(appState.devices).filter(([key, info]) => !info.enabled);
+
+        if(bannedDevices.length === 0) { 
+            h = '<tr><td colspan="2" style="text-align:center;">暂无封禁设备</td></tr>'; 
+        } else { 
+            bannedDevices.forEach(([key, info]) => {
+                const name = info.friendly_name;
+                h += `<tr>
+                    <td style="text-align:left;">${name}</td>
+                    <td style="text-align:center;">
+                        <button class="btn secondary btn-sm" onclick="setDeviceStatus('${key}', true)">解除</button>
+                        <button class="btn danger btn-sm" style="margin-left:5px;" onclick="deleteDeviceWithConfirm('${key}')">删除</button>
+                    </td>
+                </tr>`;
+            }); 
+        }
+        tbody.innerHTML = h;
+    }
+
+    function renderAccountPage() { contentArea.innerHTML = `<div class="card"><h2>面板账号设置</h2><div class="form-row"><label style="flex-basis: 80px; text-align: left;">原账号:</label><input id="old_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">原密码:</label><input id="old_pass" type="password"></div><div class="form-row"><label style="flex-basis: 80px; text-align: left;">新账号:</label><input id="new_user" type="text" value="${appState.currentUser}"><label style="flex-basis: 80px; text-align: left;">新密码:</label><input id="new_pass" type="password"><button class="btn secondary" onclick="updateAccount()">保存</button></div></div><div class="card"><h2>创建SSH隧道用户 (仅限本机登录)</h2><p style="font-size:13px;color:#64748b;">此功能会创建或更新一个系统用户，并修改 <b>/etc/ssh/sshd_config</b> 文件，以仅允许该用户从 127.0.0.1 (本机) 通过密码登录。主要用于 WSS payload 转发。请确保脚本以 root 权限运行。</p><div class="form-row"><label>SSH 用户名:</label><input id="ssh_user" type="text"><label>SSH 密码:</label><input id="ssh_pass" type="password"></div><div class="form-row" style="margin-top: 15px; gap: 15px;"><button class="btn secondary" onclick="manageSshUser('create')">创建/更新用户</button><button class="btn danger" onclick="manageSshUser('delete')">删除用户</button></div></div>`; }
     
     function renderSettingsPage() {
-        const s = appState.settings; if (!s) { contentArea.innerHTML = `<div class="card">正在加载初始数据...</div>`; return; }
-        const listen_addrs_text = s.listen_addrs ? s.listen_addrs.join('\n') : '';
+        const s = appState.settings;
+        if (!s) { contentArea.innerHTML = `<div class="card">正在加载初始数据...</div>`; return; }
         const ip_blacklist_text = s.ip_blacklist ? s.ip_blacklist.join('\n') : '';
-        contentArea.innerHTML = `<div class="card"><h2>系统设置</h2><div class="settings-grid"><div class="settings-group"><h3>服务器与端口</h3><div class="form-row full-width" style="flex-direction: column; align-items: flex-start; gap: 5px;"><label style="min-width:auto;text-align:left;">监听地址 (每行一个):</label><textarea id="s_listen_addrs" rows="4">${listen_addrs_text}</textarea></div><div class="form-row full-width"><label style="min-width:auto;text-align:left;">管理后台监听地址:</label><input id="s_admin_listen_addr" type="text" value="${s.admin_listen_addr}"></div><div class="form-row full-width"><label>证书文件路径:</label><input id="s_cert_file" type="text" value="${s.cert_file}"></div><div class="form-row full-width"><label>密钥文件路径:</label><input id="s_key_file" type="text" value="${s.key_file}"></div></div><div class="settings-group"><h3>连接与行为</h3><div class="form-row"><label>WS握手UA:</label><input id="s_ua_keyword_ws" type="text" value="${s.ua_keyword_ws}"></div><div class="form-row"><label>探测握手UA:</label><input id="s_ua_keyword_probe" type="text" value="${s.ua_keyword_probe}"></div><div class="form-row"><label>默认目标地址:</label><input id="s_default_target_host" type="text" value="${s.default_target_host}"></div><div class="form-row"><label>默认目标端口:</label><input id="s_default_target_port" type="number" value="${s.default_target_port}"></div><div class="form-row"><label>缓冲区(Bytes):</label><input id="s_buffer_size" type="number" value="${s.buffer_size}"></div><div class="form-row"><label>握手超时(秒):</label><input id="s_handshake_timeout" type="number" value="${s.handshake_timeout}"></div><div class="form-row"><label>空闲超时(秒):</label><input id="s_idle_timeout" type="number" value="${s.idle_timeout}"></div><div class="form-row"><label>最大并发连接:</label><input id="s_max_conns" type="number" value="${s.max_conns}"></div><div class="form-row" style="justify-content:space-between;padding-left:140px"><label style="min-width:auto;text-align:left;">允许同ID多点登录:</label><label class="toggle-switch"><input id="s_allow_simultaneous_connections" type="checkbox" ${s.allow_simultaneous_connections ? 'checked' : ''}><span class="slider"></span></label></div></div><div class="settings-group"><h3>用户与安全</h3><div class="form-row"><label>新设备默认有效期(天):</label><input id="s_default_expiry_days" type="number" value="${s.default_expiry_days}"></div><div class="form-row"><label>新设备默认流量(GB):</label><input id="s_default_limit_gb" type="number" value="${s.default_limit_gb}"></div><hr style="border:none; border-top:1px solid #f1f5f9; margin: 16px 0;"><div class="form-row" style="justify-content:space-between;padding-left:140px"><label style="min-width:auto;text-align:left;">启用IP黑名单:</label><label class="toggle-switch"><input id="s_enable_ip_blacklist" type="checkbox" ${s.enable_ip_blacklist ? 'checked' : ''}><span class="slider"></span></label></div><div class="form-row full-width" style="flex-direction: column; align-items: flex-start; gap: 5px;"><label style="min-width:auto;text-align:left;">IP黑名单列表:</label><textarea id="s_ip_blacklist" rows="6">${ip_blacklist_text}</textarea></div></div></div><div class="form-row" style="margin-top: 20px; gap: 15px;"><button class="btn primary" onclick="saveSettings()">保存设置</button><button class="btn danger" onclick="restartService()">重启服务</button></div></div>`;
+        contentArea.innerHTML = `<div class="card"><h2>系统设置</h2>
+            <div class="settings-grid">
+                <div class="settings-group">
+                    <h3>服务器与端口</h3>
+                    <div class="form-row"><label>WS端口 (http):</label><input id="s_http_port" type="text" value="${s.http_port}"></div>
+                    <div class="form-row"><label>WSS端口 (tls):</label><input id="s_tls_port" type="text" value="${s.tls_port}"></div>
+                    <div class="form-row"><label>管理后台端口:</label><input id="s_status_port" type="text" value="${s.status_port}"></div>
+                    <div class="form-row full-width"><label>证书文件路径 (cert_file):</label><input id="s_cert_file" type="text" value="${s.cert_file}"></div>
+                    <div class="form-row full-width"><label>密钥文件路径 (key_file):</label><input id="s_key_file" type="text" value="${s.key_file}"></div>
+                </div>
+                <div class="settings-group">
+                    <h3>连接与行为</h3>
+                    <div class="form-row"><label>WS握手UA:</label><input id="s_ua_keyword_ws" type="text" value="${s.ua_keyword_ws}"></div>
+                    <div class="form-row"><label>探测握手UA:</label><input id="s_ua_keyword_probe" type="text" value="${s.ua_keyword_probe}"></div>
+                    <div class="form-row"><label>默认目标地址:</label><input id="s_default_target_host" type="text" value="${s.default_target_host}"></div>
+                    <div class="form-row"><label>默认目标端口:</label><input id="s_default_target_port" type="text" value="${s.default_target_port}"></div>
+                    <div class="form-row"><label>缓冲区(Bytes):</label><input id="s_buffer_size" type="text" value="${s.buffer_size}"></div>
+                    <div class="form-row"><label>握手超时(秒):</label><input id="s_timeout" type="text" value="${s.timeout}"></div>
+                    <div class="form-row"><label>空闲超时(秒):</label><input id="s_idle_timeout" type="text" value="${s.idle_timeout !== undefined ? s.idle_timeout : 300}"></div>
+                    <div class="form-row" style="justify-content:space-between;padding-left:140px"><label style="min-width:auto;text-align:left;">允许同ID多点登录:</label><input id="s_allow_simultaneous_connections" type="checkbox" ${s.allow_simultaneous_connections ? 'checked' : ''}></div>
+                </div>
+                <div class="settings-group">
+                    <h3>用户与安全</h3>
+                    <div class="form-row"><label>新设备默认有效期(天):</label><input id="s_default_expiry_days" type="text" value="${s.default_expiry_days}"></div>
+                    <div class="form-row"><label>新设备默认流量(GB):</label><input id="s_default_limit_gb" type="text" value="${s.default_limit_gb}"></div>
+                    <hr style="border:none; border-top:1px solid #f1f5f9; margin: 16px 0;">
+                    <div class="form-row" style="justify-content:space-between;padding-left:140px"><label style="min-width:auto;text-align:left;">启用IP黑名单:</label><input id="s_enable_ip_blacklist" type="checkbox" ${s.enable_ip_blacklist ? 'checked' : ''}></div>
+                    <div class="form-row full-width" style="flex-direction: column; align-items: flex-start; gap: 5px;">
+                        <label style="min-width:auto;text-align:left;font-weight:normal;color:#334155;">IP黑名单列表 (逗号或换行分隔):</label>
+                        <textarea id="s_ip_blacklist" rows="8">${ip_blacklist_text}</textarea>
+                    </div>
+                </div>
+            </div>
+            <!-- *** MODIFIED/ADDED LINES START *** -->
+            <div class="form-row" style="margin-top: 20px; gap: 15px;">
+                <button class="btn warning" onclick="saveSettings()">保存设置</button>
+                <button class="btn danger" onclick="restartService()">重启服务</button>
+            </div>
+            <!-- *** MODIFIED/ADDED LINES END *** -->
+        </div>`;
     }
-    function renderLogsPage() { contentArea.innerHTML = `<div class="card"><h2>日志查看器(最新200条)</h2><div id="log-viewer" style="height:calc(100vh - 280px);overflow:auto;background:#282c34;color:#abb2bf;padding:10px;border-radius:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;"></div></div>`; const v = gid('log-viewer'); if (!v) return; v.innerHTML = appState.logs.join('\n'); v.scrollTop = v.scrollHeight; }
+
+    function renderLogsPage() { 
+        contentArea.innerHTML = `<div class="card"><h2>日志查看器(最新200条)</h2><div id="log-viewer" style="height:calc(100vh - 280px);overflow:auto;background:#282c34;color:#abb2bf;padding:10px;border-radius:8px;font-family:monospace;font-size:12px;white-space:pre-wrap;"></div></div>`; 
+        const v = gid('log-viewer'); 
+        if (!v) return; 
+        v.innerHTML = appState.logs.join('\n');
+        v.scrollTop = v.scrollHeight;
+    }
     
     async function updateDynamicData() {
         const path = window.location.hash || '#/status';
-        const [statusData, connsData] = await Promise.all([ get('/api/server_status'), get("/api/connections") ]);
-        if (statusData === null || connsData === null) { console.error("核心API数据获取失败，可能需要重新登录。"); return; }
+
+        const [statusData, connsData] = await Promise.all([
+            get('/api/server_status'),
+            get("/api/connections")
+        ]);
+
+        if (statusData === null || connsData === null) {
+            console.error("核心API数据获取失败，可能需要重新登录。");
+            return;
+        }
+
         if (gid('cpu-usage')) gid('cpu-usage').textContent = (statusData.cpu_percent !== undefined) ? statusData.cpu_percent.toFixed(1) + '%' : '...';
         if (gid('cpu-cores')) gid('cpu-cores').textContent = statusData.cpu_cores || '...';
-        if (gid('mem-usage') && statusData.mem_percent !== undefined) { const used_gb = statusData.mem_used / (1024 ** 3); const total_gb = statusData.mem_total / (1024 ** 3); gid('mem-usage').textContent = `${used_gb.toFixed(1)} / ${total_gb.toFixed(1)} GB (${statusData.mem_percent.toFixed(1)}%)`; }
+        if (gid('mem-usage') && statusData.mem_percent !== undefined) {
+            const used_gb = statusData.mem_used / (1024 ** 3);
+            const total_gb = statusData.mem_total / (1024 ** 3);
+            gid('mem-usage').textContent = `${used_gb.toFixed(1)} / ${total_gb.toFixed(1)} GB (${statusData.mem_percent.toFixed(1)}%)`;
+        }
         if (gid('server-uptime')) gid('server-uptime').textContent = statusData.uptime || '...';
         if (gid('global-sent')) gid('global-sent').textContent = formatBytesJS(statusData.bytes_sent || 0);
         if (gid('global-received')) gid('global-received').textContent = formatBytesJS(statusData.bytes_received || 0);
+        
         appState.connections = connsData;
         if (gid('active-connections')) gid('active-connections').textContent = connsData.length;
-        if (path === '#/status') { renderConnectionsTable(); } 
-        else if (path === '#/device') { const [devicesData, usageData] = await Promise.all([get('/api/devices'), get('/api/device_usage')]); if (devicesData) appState.devices = devicesData; if (usageData) appState.usage = usageData; renderDevicesTable(); renderDisabledDevicesTable(); } 
-        else if (path === '#/logs') { const logsData = await get('/api/logs'); if (logsData) { appState.logs = logsData; const v = gid('log-viewer'); if (v) { const newContent = appState.logs.join('\n'); if (v.innerHTML !== newContent) { v.innerHTML = newContent; if (v.scrollHeight - v.scrollTop < v.clientHeight + 50) { v.scrollTop = v.scrollHeight; } } } } }
-    }
-    
-    // --- [FIX] All device management functions below now use 'sec_ws_key' and correct data structures ---
-
-    async function toggleDeviceAuth() { const toggle = gid('device-auth-toggle'); const statusText = gid('device-auth-status-text'); const isEnabled = toggle.checked; const originalText = statusText.textContent; statusText.textContent = "保存中..."; toggle.disabled = true; const r = await post("/api/settings/toggle_device_auth", { enable: isEnabled }); if (r && r.status === 'ok') { showToast(r.message, 'success'); appState.settings.enable_device_id_auth = isEnabled; statusText.textContent = isEnabled ? "认证开启" : "已关闭"; } else { showToast(r ? r.message : "操作失败", 'error'); toggle.checked = !isEnabled; statusText.textContent = originalText; } toggle.disabled = false; }
-    
-    async function saveDevice() {
-        const d = { 
-            friendly_name: gid("friendly_name").value.trim(), 
-            sec_ws_key: gid("sec_ws_key").value.trim(), 
-            expiry: gid("expiry").value.trim(), 
-            limit_gb: gid("limit_gb").value.trim(), // Keep as string, Go backend will parse
-            max_sessions: parseFloat(gid("max_sessions").value) || 1
-        };
-        if (!d.friendly_name || !d.expiry || !d.sec_ws_key) return showToast("名称, 密钥和有效期不能为空", 'error');
-        const r = await post("/device/add", d);
-        if (r) { 
-            showToast(r.message, r.status === 'ok' ? 'success' : 'error'); 
-            if (r.status === 'ok') { 
-                const [devs, usage] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
-                appState.devices = devs || appState.devices; 
-                appState.usage = usage || appState.usage; 
-                renderDevicesTable(); 
-                renderDisabledDevicesTable();
-                // Clear form after successful save
-                gid('friendly_name').value = '';
-                gid('sec_ws_key').value = '';
-                gid('sec_ws_key').readOnly = false;
-                gid('expiry').value = '';
-                gid('limit_gb').value = '';
-                gid('max_sessions').value = '1';
-                gid('ban-unban-button-container').innerHTML = '';
-            } 
+        
+        if (path === '#/status') {
+            renderConnectionsTable();
+        } 
+        else if (path === '#/device') {
+            const [devicesData, usageData] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
+            if (devicesData) appState.devices = devicesData;
+            if (usageData) appState.usage = usageData;
+            renderDevicesTable();
+            renderBlacklistTable();
+        } 
+        else if (path === '#/logs') {
+            const logsData = await get('/api/logs');
+            if (logsData) {
+                appState.logs = logsData;
+                const v = gid('log-viewer');
+                if (v) {
+                    const newContent = appState.logs.join('\n');
+                    if (v.innerHTML !== newContent) {
+                        v.innerHTML = newContent;
+                        if (v.scrollHeight - v.scrollTop < v.clientHeight + 50) {
+                             v.scrollTop = v.scrollHeight;
+                        }
+                    }
+                }
+            }
         }
     }
     
-    async function deleteDeviceWithConfirm(secWsKey) {
-        const name = appState.devices[secWsKey]?.friendly_name || '未知设备';
+    async function toggleDeviceAuth() { const toggle = gid('device-auth-toggle'); const statusText = gid('device-auth-status-text'); const isEnabled = toggle.checked; const originalText = statusText.textContent; statusText.textContent = "保存中..."; toggle.disabled = true; const r = await post("/api/settings/toggle_device_auth", { enable: isEnabled }); if (r && r.status === 'ok') { showToast(r.message, 'success'); appState.settings.enable_device_id_auth = isEnabled; statusText.textContent = isEnabled ? "认证开启" : "已关闭"; } else { showToast(r ? r.message : "操作失败", 'error'); toggle.checked = !isEnabled; statusText.textContent = originalText; } toggle.disabled = false; }
+    
+    async function addID() {
+        const d = {
+            friendly_name: gid("device_name").value.trim(),
+            sec_ws_key: gid("sec_ws_key").value.trim(),
+            expiry: gid("expiry").value.trim(),
+            limit_gb: gid("limit_gb").value.trim() || "0",
+            max_sessions: parseInt(gid("max_sessions").value, 10) || 1
+        };
+        if (!d.friendly_name || !d.expiry) return showToast("名称和有效期不能为空", 'error');
+        if (!d.sec_ws_key) return showToast("设备密钥不能为空", 'error');
+        const r = await post("/device/add", d);
+        if (r) {
+            showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+            if (r.status === 'ok') {
+                const [devs, usage] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
+                appState.devices = devs || appState.devices;
+                appState.usage = usage || appState.usage;
+                renderDevicesTable();
+                renderBlacklistTable();
+            }
+        }
+    }
+    
+    async function deleteDeviceWithConfirm(key) {
+        const name = appState.devices[key]?.friendly_name || '未知设备';
         showConfirm('确认删除', `您确定要永久删除设备 "${name}" 吗？此操作不可撤销。`, async () => {
-            const r = await post("/device/delete", { "sec_ws_key": secWsKey });
+            const r = await post("/device/delete", { sec_ws_key: key });
             if (r) {
                 showToast(r.message, r.status === 'ok' ? 'success' : 'error');
                 if (r.status === "ok") {
                     const [devs, usage] = await Promise.all([get('/api/devices'), get('/api/device_usage')]);
-                    appState.devices = devs || appState.devices; appState.usage = usage || appState.usage;
-                    renderDevicesTable(); renderDisabledDevicesTable();
-                    // Clear form if the deleted device was being edited
-                    if (gid('sec_ws_key').value === secWsKey) {
-                        gid('friendly_name').value = '';
-                        gid('sec_ws_key').value = '';
-                        gid('sec_ws_key').readOnly = false;
-                        gid('expiry').value = '';
-                        gid('limit_gb').value = '';
-                        gid('max_sessions').value = '1';
-                        gid('ban-unban-button-container').innerHTML = '';
-                    }
+                    appState.devices = devs || appState.devices;
+                    appState.usage = usage || appState.usage;
+                    renderDevicesTable();
+                    renderBlacklistTable();
                 }
             }
         });
     }
     
     async function resetTraffic() {
-        const secWsKey = gid("sec_ws_key").value.trim();
-        if (!secWsKey) return showToast("请先点击一个设备以填充表单", 'error');
-        const name = appState.devices[secWsKey]?.friendly_name || '该设备';
+        const key = gid("current_editing_key").value.trim();
+        if (!key) return showToast("请先点击一个设备以填充表单", 'error');
+        const name = appState.devices[key]?.friendly_name || '该设备';
+
         showConfirm('确认重置流量', `您确定要重置设备 "${name}" 的已用流量吗？`, async () => {
-            const r = await post("/device/reset_traffic", { "sec_ws_key": secWsKey });
-            if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); if (r.status === 'ok') { const usage = await get('/api/device_usage'); if (usage) { appState.usage = usage; renderDevicesTable(); } else { showToast('流量已重置，但刷新数据失败', 'warning'); } } }
+            const r = await post("/device/reset_traffic", { sec_ws_key: key });
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === 'ok') {
+                    const usage = await get('/api/device_usage');
+                    if (usage) {
+                        appState.usage = usage;
+                        renderDevicesTable();
+                    } else {
+                        showToast('流量已重置，但刷新数据失败', 'warning');
+                    }
+                }
+            }
         });
     }
     
-    function fillDeviceForm(secWsKey) {
-        const info = appState.devices[secWsKey];
+    function fillDeviceForm(key) {
+        const info = appState.devices[key];
         if (!info) return;
-        gid("friendly_name").value = info.friendly_name;
-        gid("sec_ws_key").value = secWsKey;
-        gid("sec_ws_key").readOnly = true; // Key should not be changed when editing
+        gid("device_name").value = info.friendly_name;
+        gid("sec_ws_key").value = key;
+        gid("current_editing_key").value = key;
         gid("expiry").value = info.expiry;
         gid("limit_gb").value = info.limit_gb;
-        gid("max_sessions").value = info.max_sessions || 1;
+        gid("max_sessions").value = typeof info.max_sessions !== "undefined" ? info.max_sessions : 1;
         document.querySelectorAll('#device-list tbody tr').forEach(r => r.classList.remove('highlight'));
-        gid(`device-row-${secWsKey}`)?.classList.add('highlight');
+        gid(`device-row-${key}`)?.classList.add('highlight');
+        
         const btnContainer = gid('ban-unban-button-container');
-        btnContainer.innerHTML = `<button class="btn warning" onclick="setDeviceStatusFromForm(false)">禁用设备</button>`;
+        if (info.enabled) {
+            btnContainer.innerHTML = `<button class="btn warning" onclick="setDeviceStatusFromForm(false)">封禁账号</button>`;
+        } else {
+            btnContainer.innerHTML = `<button class="btn secondary" onclick="setDeviceStatusFromForm(true)">解除封禁</button>`;
+        }
     }
     
     function generateNewDevice() {
-        gid('friendly_name').value = '';
         gid("sec_ws_key").value = btoa(String.fromCharCode.apply(null, crypto.getRandomValues(new Uint8Array(16))));
-        gid('sec_ws_key').readOnly = false;
-        const d = parseInt(appState.settings.default_expiry_days, 10), t = new Date();
+        const d = parseInt(appState.settings.default_expiry_days), t = new Date();
         t.setDate(t.getDate() + d);
         gid('expiry').value = `${t.getFullYear()}-${('0' + (t.getMonth() + 1)).slice(-2)}-${('0' + t.getDate()).slice(-2)}`;
         gid('limit_gb').value = appState.settings.default_limit_gb;
         gid('max_sessions').value = "1";
-        showToast('新设备信息已填充', 'info');
+        showToast('新设备信息已填充 (名称未生成)', 'info');
     }
     
-    function copyToClipboard(text) { if(!text) return showToast('设备密钥为空', 'warning'); if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(text).then(() => { showToast('Key已复制到剪贴板', 'success'); }, () => { showToast('使用 Clipboard API 复制失败', 'error'); }); } else { const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'absolute'; ta.style.left = '-9999px'; document.body.appendChild(ta); ta.focus(); ta.select(); try { if (document.execCommand('copy')) { showToast('Key已复制到剪贴板', 'success'); } else { showToast('复制失败', 'error'); } } catch (err) { showToast('复制失败: ' + err, 'error'); } document.body.removeChild(ta); } }
-    function filterDevicesTable() { const q = (gid("search_input_device")?.value || "").toLowerCase(); const rows = gid("device-list")?.querySelectorAll("tbody tr"); if (!rows) return; rows.forEach(row => { row.style.display = row.textContent.toLowerCase().includes(q) ? "" : "none"; }); }
+    function copyToClipboard(text) {
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('Key已复制到剪贴板', 'success');
+            }, () => {
+                showToast('使用 Clipboard API 复制失败', 'error');
+            });
+        } else {
+            const textArea = document.createElement('textarea');
+            textArea.value = text;
+            textArea.style.position = 'absolute';
+            textArea.style.left = '-9999px';
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            try {
+                const successful = document.execCommand('copy');
+                if (successful) {
+                    showToast('Key已复制到剪贴板', 'success');
+                } else {
+                    showToast('复制失败：无法执行复制命令', 'error');
+                }
+            } catch (err) {
+                showToast('复制失败: ' + err, 'error');
+            }
+            document.body.removeChild(textArea);
+        }
+    }
+
+    function filterDevicesTable() {
+        const q = (gid("search_input_device")?.value || "").toLowerCase();
+        const rows = gid("device-list")?.querySelectorAll("tbody tr");
+        if (!rows) return;
+        let matches = [];
+        rows.forEach(row => {
+            const rowContent = row.textContent.toLowerCase();
+            const secKey = (row.dataset.secWsKey || "").toLowerCase();
+            const isVisible = rowContent.includes(q) || secKey.includes(q);
+            
+            row.style.display = isVisible ? "" : "none";
+            row.classList.remove('highlight');
+            if (isVisible && q) matches.push(row);
+        });
+        if (q && matches.length > 0) {
+            const tbody = matches[0].parentNode;
+            matches.reverse().forEach(row => {
+                row.classList.add('highlight');
+                tbody.insertBefore(row, tbody.firstChild);
+            });
+        }
+    }
+
     async function updateAccount() { const d = { old_user: gid("old_user").value, old_pass: gid("old_pass").value, new_user: gid("new_user").value, new_pass: gid("new_pass").value }; if (Object.values(d).some(v => !v)) return showToast("请完整填写所有字段", "error"); const r = await post("/account/update", d); if (r) { if (r.status === 'ok') { showToast(r.message, 'success'); setTimeout(() => logout("密码已更新，请重新登录。"), 1500); } else { showToast(r.message, 'error'); } } }
     function logout(message) { if(message) { document.body.innerHTML = `<h1>${message}</h1>`; } post("/logout").finally(() => { window.location.href = "/"; }); }
     async function manageSshUser(action) { const user = gid('ssh_user').value.trim(); const pass = gid('ssh_pass').value.trim(); if (!user) return showToast('SSH用户名不能为空', 'error'); if (action === 'create' && !pass) return showToast('创建用户时密码不能为空', 'error'); showConfirm(`确认${action==='create'?'创建/更新':'删除'}SSH用户`, `确定要${action==='create'?'创建/更新':'删除'}SSH用户 "${user}" 吗？`, async () => { const r = await post(`/api/ssh/${action}`, { username: user, password: pass }); if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); if (r.status === 'ok') gid('ssh_pass').value = ''; } }); }
-    async function kickConnection(connKey) { const conn = appState.connections.find(c => c.conn_key === connKey); if (!conn) return showToast('连接已不存在', 'warning'); showConfirm('确认踢掉连接', `确定要断开设备 "${conn.device_id}" (IP: ${conn.ip}) 的连接吗？`, async () => { const r = await post("/api/kick", { conn_key: connKey }); if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); } }); }
-    async function setDeviceStatus(secWsKey, isEnabled) { const name = appState.devices[secWsKey]?.friendly_name || '该设备'; const actionText = isEnabled ? '启用' : '禁用'; showConfirm(`确认${actionText}`, `您确定要${actionText}设备 "${name}" 吗？`, async () => { const r = await post("/device/set_status", { "sec_ws_key": secWsKey, enabled: isEnabled }); if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); if (r.status === 'ok') { const devices = await get('/api/devices'); if(devices) { appState.devices = devices; renderDevicesTable(); renderDisabledDevicesTable(); if (gid('sec_ws_key').value === secWsKey) { fillDeviceForm(secWsKey); } } } } }); }
-    function setDeviceStatusFromForm(isEnabled) { const secWsKey = gid('sec_ws_key').value.trim(); if (!secWsKey) return showToast('请先点击一个设备', 'error'); setDeviceStatus(secWsKey, isEnabled); }
+    
+    async function addIpToBlacklist(ip) {
+        if (!appState.settings) {
+            showToast('无法封禁IP：系统设置未加载', 'error');
+            return;
+        }
+
+        if (!Array.isArray(appState.settings.ip_blacklist)) {
+            appState.settings.ip_blacklist = [];
+        }
+
+        if (appState.settings.ip_blacklist.includes(ip)) {
+            showToast(`IP ${ip} 已存在于黑名单中`, 'info');
+            return;
+        }
+
+        const newSettings = JSON.parse(JSON.stringify(appState.settings));
+        newSettings.ip_blacklist.push(ip);
+        
+        if (!newSettings.enable_ip_blacklist) {
+            newSettings.enable_ip_blacklist = true;
+            showToast('IP黑名单已自动启用', 'info');
+        }
+
+        const r = await post("/settings/save", newSettings);
+        if (r && r.status === 'ok') {
+            showToast(`IP ${ip} 已成功加入系统黑名单`, 'success');
+            appState.settings = newSettings;
+        } else {
+            showToast(`将 IP ${ip} 加入黑名单失败`, 'error');
+        }
+    }
+    
+    function banUserFromConn(connKey, deviceId) {
+        post("/api/kick", { conn_key: connKey });
+
+        if (deviceId && deviceId.includes('.')) {
+            showToast(`正在将IP ${deviceId} 加入系统黑名单...`, 'info');
+            addIpToBlacklist(deviceId);
+        } else if (deviceId) {
+            let deviceKey = null;
+            for(const [key, info] of Object.entries(appState.devices)) {
+                if (info.friendly_name === deviceId) {
+                    deviceKey = key;
+                    break;
+                }
+            }
+            if(deviceKey) {
+                setDeviceStatus(deviceKey, false);
+            } else {
+                showToast(`无法在设备列表中找到 ${deviceId} 进行封禁`, 'error');
+            }
+        } else {
+            showToast('无法禁止未知设备或IP地址', 'error');
+        }
+    }
+
+    async function setDeviceStatus(key, isEnabled) {
+        const name = appState.devices[key]?.friendly_name || '该设备';
+        const actionText = isEnabled ? '解封' : '封禁';
+        showConfirm(`确认${actionText}`, `您确定要${actionText}设备 "${name}" 吗？`, async () => {
+            const r = await post("/device/set_status", { sec_ws_key: key, enabled: isEnabled });
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === 'ok') {
+                    const devices = await get('/api/devices');
+                    if(devices) {
+                        appState.devices = devices;
+                        renderDevicesTable();
+                        renderBlacklistTable(); 
+                        if (gid('current_editing_key').value === key) {
+                            fillDeviceForm(key);
+                        }
+                    }
+                }
+            }
+        });
+    }
+    
+    function setDeviceStatusFromForm(isEnabled) {
+        const key = gid('current_editing_key').value.trim();
+        if (!key) return showToast('请先点击一个设备', 'error');
+        setDeviceStatus(key, isEnabled);
+    }
+    
     function filterConnectionsTable() { const q = (gid("search_input_conn")?.value || "").toLowerCase(); gid("connections-body")?.querySelectorAll("tr").forEach(r => { r.style.display = r.textContent.toLowerCase().includes(q) ? "" : "none"; }); }
-    async function saveSettings() { const s = appState.settings; if (!s) return showToast('无法保存：设置未加载', 'error'); const newSettings = {}; document.querySelectorAll('[id^="s_"]').forEach(el => { const key = el.id.substring(2); let value = (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value.trim(); if (key === 'listen_addrs' || key === 'ip_blacklist') { value = value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean); } const numFields = ['default_target_port', 'buffer_size', 'handshake_timeout', 'idle_timeout', 'max_conns', 'default_expiry_days', 'default_limit_gb']; if (numFields.includes(key)) { value = parseInt(value, 10); } newSettings[key] = value; }); newSettings.ip_whitelist = s.ip_whitelist || []; newSettings.enable_ip_whitelist = s.enable_ip_whitelist || false; showConfirm('确认保存设置', '确定要保存这些设置吗？如果修改了监听地址，服务需要重启才能生效。', async () => { const r = await post("/settings/save", newSettings); if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); if (r.status === 'ok') { appState.settings = await get('/api/settings'); if (!r.message.includes("重启")) { renderSettingsPage(); } } } }); }
-    function restartService() { showConfirm('确认重启服务', '您确定要立即重启 WSTunnel 服务吗？所有当前连接都将中断。', async () => { const r = await post("/api/server/restart", {}); if (r) { showToast(r.message, r.status === 'ok' ? 'success' : 'error'); } }); }
+    
+    async function saveSettings() {
+        const d = {};
+        document.querySelectorAll('[id^="s_"]').forEach(el => {
+            let key = el.id.substring(2);
+            let value = (el.type === 'checkbox' || el.type === 'radio') ? el.checked : el.value;
+            
+            if (key === 'ip_blacklist') {
+                value = value.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+            }
+            
+            const numberFields = ['http_port', 'tls_port', 'status_port', 'default_target_port', 'buffer_size', 'timeout', 'idle_timeout', 'default_expiry_days', 'default_limit_gb'];
+            if (numberFields.includes(key)) {
+                value = parseInt(value, 10);
+            }
+            d[key] = value;
+        });
+
+        if (appState.settings && appState.settings.ip_whitelist) {
+            d.ip_whitelist = appState.settings.ip_whitelist;
+        } else {
+            d.ip_whitelist = [];
+        }
+
+        showConfirm('确认保存设置', '确定要保存这些设置吗？如果修改了端口，服务将会重启。', async () => {
+            const r = await post("/settings/save", d);
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+                if (r.status === 'ok') appState.settings = await get('/api/settings');
+            }
+        });
+    }
+    
+    // *** NEW FUNCTION ***
+    function restartService() {
+        showConfirm('确认重启服务', '您确定要立即重启 WSTunnel 服务吗？所有当前连接都将中断。', async () => {
+            const r = await post("/api/server/restart", {});
+            if (r) {
+                showToast(r.message, r.status === 'ok' ? 'success' : 'error');
+            }
+        });
+    }
 
     const routes = { '#/status': renderStatusPage, '#/device': renderDevicePage, '#/account': renderAccountPage, '#/settings': renderSettingsPage, '#/logs': renderLogsPage };
     function router() { if (refreshInterval) clearInterval(refreshInterval); const path = window.location.hash || '#/status'; const renderFunc = routes[path] || routes['#/status']; document.querySelectorAll('.navbar a').forEach(a => { a.classList.toggle('active', a.getAttribute('href') === path); }); renderFunc(); refreshInterval = setInterval(updateDynamicData, 3000); }
