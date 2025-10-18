@@ -1,4 +1,3 @@
-// wstunnel_final_merged_v6_fixed.go
 package main
 
 import (
