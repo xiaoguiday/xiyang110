@@ -86,6 +86,7 @@ type Proxy struct {
 	deviceUsage         sync.Map
 	tlsConfig           *tls.Config
 	connSemaphore       chan struct{}
+	listeners           []net.Listener // <--- 修正点: 添加 listeners 字段
 	globalBytesSent     int64
 	globalBytesReceived int64
 	logBuffer           *RingBuffer
@@ -125,12 +126,16 @@ type SystemStatus struct {
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
-	if size <= 0 { size = 32 * 1024 }
+	if size <= 0 {
+		size = 32 * 1024
+	}
 	bufferPool = sync.Pool{New: func() interface{} { return make([]byte, size) }}
 }
 func getBuf(size int) []byte {
 	b := bufferPool.Get().([]byte)
-	if cap(b) < size { return make([]byte, size) }
+	if cap(b) < size {
+		return make([]byte, size)
+	}
 	return b[:size]
 }
 func putBuf(b []byte) { bufferPool.Put(b) }
@@ -158,9 +163,13 @@ func (rb *RingBuffer) GetLogs() []string {
 	var logs []string
 	for i := 0; i < len(rb.buffer); i++ {
 		idx := (rb.head + i) % len(rb.buffer)
-		if rb.buffer[idx] != "" { logs = append(logs, rb.buffer[idx]) }
+		if rb.buffer[idx] != "" {
+			logs = append(logs, rb.buffer[idx])
+		}
 	}
-	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 { logs[i], logs[j] = logs[j], logs[i] }
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
+		logs[i], logs[j] = logs[j], logs[i]
+	}
 	return logs
 }
 
@@ -196,22 +205,32 @@ func (c *Config) SaveAtomic() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	tmp := ConfigFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil { return err }
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
 	return os.Rename(tmp, ConfigFile)
 }
 
 func LoadConfig() (*Config, error) {
 	if _, err := os.Stat(ConfigFile); os.IsNotExist(err) {
 		cfg := defaultConfig()
-		if err := cfg.SaveAtomic(); err != nil { return nil, err }
+		if err := cfg.SaveAtomic(); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 	data, err := os.ReadFile(ConfigFile)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	cfg := &Config{}
-	if err := json.Unmarshal(data, cfg); err != nil { return nil, err }
+	if err := json.Unmarshal(data, cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 // ==========================================================
@@ -247,6 +266,7 @@ func NewProxy(cfg *Config) (*Proxy, error) {
 		logBuffer:     NewRingBuffer(logBufferSize),
 		tlsConfig:     tlsConfig,
 		connSemaphore: make(chan struct{}, cfg.Settings.MaxConns),
+		listeners:     make([]net.Listener, 0),
 	}
 
 	initBufferPool(p.cfg.Settings.BufferSize)
@@ -259,7 +279,6 @@ func (p *Proxy) Start() error {
 		return errors.New("no listen addresses configured")
 	}
 
-	var listeners []net.Listener
 	for _, addr := range p.cfg.Settings.ListenAddrs {
 		l, err := net.Listen("tcp4", addr)
 		if err != nil {
@@ -267,13 +286,13 @@ func (p *Proxy) Start() error {
 			continue
 		}
 		p.Print("[*] Proxy listening on %s", addr)
-		listeners = append(listeners, l)
+		p.listeners = append(p.listeners, l)
 
 		p.wg.Add(1)
 		go p.acceptLoop(l)
 	}
 
-	if len(listeners) == 0 {
+	if len(p.listeners) == 0 {
 		return errors.New("no valid listeners started")
 	}
 
@@ -283,6 +302,11 @@ func (p *Proxy) Start() error {
 
 func (p *Proxy) Shutdown() {
 	p.Print("[*] Shutting down server...")
+
+	for _, l := range p.listeners {
+		l.Close()
+	}
+
 	p.cancel()
 	p.wg.Wait()
 	p.saveDeviceUsage()
@@ -291,7 +315,6 @@ func (p *Proxy) Shutdown() {
 
 func (p *Proxy) acceptLoop(l net.Listener) {
 	defer p.wg.Done()
-	defer l.Close()
 
 	for {
 		conn, err := l.Accept()
@@ -300,9 +323,11 @@ func (p *Proxy) acceptLoop(l net.Listener) {
 			case <-p.ctx.Done():
 				return
 			default:
-				p.Print("[!] accept error on %s: %v", l.Addr().String(), err)
-				time.Sleep(100 * time.Millisecond)
-				continue
+				// Don't log "use of closed network connection" error on shutdown
+				if !strings.Contains(err.Error(), "use of closed network connection") {
+					p.Print("[!] accept error on %s: %v", l.Addr().String(), err)
+				}
+				return // Exit loop on any accept error
 			}
 		}
 
@@ -344,7 +369,7 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	if err != nil {
 		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-				p.Print("[-] Peek error from %s: %v", remoteIP, err)
+				// p.Print("[-] Peek error from %s: %v", remoteIP, err)
 			}
 		}
 		return
@@ -852,36 +877,4 @@ func main() {
 
 func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText, body string) {
 	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", statusCode, statusText, len(body), body)
-	_, _ = conn.Write([]byte(response))
-	conn.Close()
-}
-func extractHeaderValue(text, name string) string {
-	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
-	m := re.FindStringSubmatch(text)
-	if len(m) > 1 { return strings.TrimSpace(m[1]) }
-	return ""
-}
-func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code); _, _ = w.Write(response)
-}
-func formatBytes(b int64) string {
-	const unit = 1024; if b < unit { return fmt.Sprintf("%d B", b) }
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit { div *= unit; exp++ }
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-func isIPInList(ip string, list []string) bool {
-	for _, item := range list { if item == ip { return true } }
-	return false
-}
-// ############ 修正点: 添加 bcrypt 函数实现 ############
-func hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	return string(bytes), err
-}
-func checkPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
-}
+	_, _ = conn
