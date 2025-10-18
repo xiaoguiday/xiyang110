@@ -48,7 +48,6 @@ func initBufferPool(size int) {
 }
 
 // getBuf 从池中获取一个指定大小的缓冲区。
-// 如果池中的缓冲区容量不足，会创建一个新的。
 func getBuf(size int) []byte {
 	b := bufferPool.Get().([]byte)
 	if cap(b) < size {
@@ -80,7 +79,7 @@ func (rb *RingBuffer) Add(msg string) {
 	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg)
 	rb.buffer[rb.head] = logLine
 	rb.head = (rb.head + 1) % len(rb.buffer)
-	fmt.Println(logLine) // 同时输出到控制台
+	fmt.Println(logLine)
 }
 func (rb *RingBuffer) GetLogs() []string {
 	rb.mu.RLock()
@@ -92,7 +91,6 @@ func (rb *RingBuffer) GetLogs() []string {
 			logs = append(logs, rb.buffer[idx])
 		}
 	}
-	// 反转切片，让最新的日志在最前面
 	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
 		logs[i], logs[j] = logs[j], logs[i]
 	}
@@ -161,7 +159,6 @@ func GetConfig() *Config {
 func (c *Config) load() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	// 设置默认值
 	c.Settings = Settings{
 		HTTPPort:                     80,
 		TLSPort:                      443,
@@ -182,7 +179,7 @@ func (c *Config) load() error {
 	}
 	c.Accounts = map[string]string{"admin": "admin"}
 	c.DeviceIDs = make(map[string]DeviceInfo)
-	data, err := os.ReadFile(ConfigFile) // 使用 os.ReadFile
+	data, err := os.ReadFile(ConfigFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			Print("[*] %s not found, creating with default structure.", ConfigFile)
@@ -195,25 +192,20 @@ func (c *Config) load() error {
 	}
 	return nil
 }
-
-// save 以原子方式保存配置文件，防止文件损坏。
 func (c *Config) save() error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
 	tmpFile := ConfigFile + ".tmp"
-	// 先写入临时文件
 	if err := os.WriteFile(tmpFile, data, 0644); err != nil {
 		return fmt.Errorf("failed to write to temporary config file: %w", err)
 	}
-	// 通过重命名原子地替换原文件
 	if err := os.Rename(tmpFile, ConfigFile); err != nil {
 		return fmt.Errorf("failed to apply config changes: %w", err)
 	}
 	return nil
 }
-
 func (c *Config) SafeSave() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -239,7 +231,7 @@ func (c *Config) GetDeviceIDs() map[string]DeviceInfo {
 	devices := make(map[string]DeviceInfo)
 	for k, v := range c.DeviceIDs {
 		if v.MaxSessions < 1 {
-			v.MaxSessions = 1 // 确保至少有1个会话
+			v.MaxSessions = 1
 		}
 		devices[k] = v
 	}
@@ -270,10 +262,9 @@ type ActiveConnInfo struct {
 	LastSpeedUpdateTime    time.Time
 	LastTotalBytesForSpeed int64
 	CurrentSpeedBps        float64
-	cancel                 context.CancelFunc // 用于优雅地关闭连接
+	cancel                 context.CancelFunc
 }
 
-// Snapshot 创建一个线程安全的连接信息副本，用于API展示。
 func (c *ActiveConnInfo) Snapshot() APIConnectionResponse {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -380,9 +371,9 @@ func auditActiveConnections() {
 		if shouldKick {
 			Print("[-] [审计] 踢出连接 (原因: %s, 设备: %s, IP: %s)", reason, connInfo.DeviceID, connInfo.IP)
 			if connInfo.cancel != nil {
-				connInfo.cancel() // 通过 context 优雅关闭
+				connInfo.cancel()
 			} else {
-				connInfo.Writer.Close() // 备用方案
+				connInfo.Writer.Close()
 			}
 		}
 		return true
@@ -463,6 +454,37 @@ func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText string, bod
 	conn.Close()
 }
 
+func extractHeaderValue(text, name string) string {
+	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
+	m := re.FindStringSubmatch(text)
+	if len(m) > 1 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
+func isIPInList(ip string, list []string) bool {
+	for _, item := range list {
+		if item == ip {
+			return true
+		}
+	}
+	return false
+}
+func runCommand(command string, args ...string) (bool, string) {
+	cmd := exec.Command(command, args...)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String())
+	}
+	return true, out.String()
+}
+// ==========================================================
+// --- 核心连接处理 (已修正) ---
+// ==========================================================
+
 func handleClient(conn net.Conn, isTLS bool) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	Print("[+] Connection opened from %s", remoteIP)
@@ -478,7 +500,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpConn.SetNoDelay(true) // 禁用Nagle算法，降低延迟
+		tcpConn.SetNoDelay(true)
 	}
 
 	if settings.EnableIPBlacklist && isIPInList(remoteIP, settings.IPBlacklist) {
@@ -531,7 +553,6 @@ func handleClient(conn net.Conn, isTLS bool) {
 		_ = req.Header.Write(&headerBuilder)
 		headersText = req.Method + " " + req.RequestURI + " " + req.Proto + "\r\n" + headerBuilder.String()
 
-		// 限制请求体大小，防止DoS攻击
 		req.Body = http.MaxBytesReader(nil, req.Body, 64*1024)
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
@@ -542,6 +563,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 		req.Body.Close()
 		initialData = body
 
+		// --- (中间的认证和逻辑判断部分没有变化) ---
 		credential = req.Header.Get("Sec-WebSocket-Key")
 		var found bool
 		if credential != "" {
@@ -609,12 +631,12 @@ func handleClient(conn net.Conn, isTLS bool) {
 				return
 			}
 		}
+		// --- (认证逻辑结束) ---
 
 		activeConnInfo.mu.Lock()
 		activeConnInfo.DeviceID = finalDeviceID
 		activeConnInfo.Credential = credential
 		activeConnInfo.mu.Unlock()
-
 		if _, ok := deviceUsage.Load(credential); !ok && credential != "" {
 			newUsage := int64(0)
 			deviceUsage.Store(credential, &newUsage)
@@ -665,7 +687,7 @@ func handleClient(conn net.Conn, isTLS bool) {
 	if tcpTargetConn, ok := targetConn.(*net.TCPConn); ok {
 		tcpTargetConn.SetKeepAlive(true)
 		tcpTargetConn.SetKeepAlivePeriod(30 * time.Second)
-		tcpTargetConn.SetNoDelay(true) // 禁用Nagle算法
+		tcpTargetConn.SetNoDelay(true)
 	}
 
 	if len(initialData) > 0 {
@@ -674,6 +696,30 @@ func handleClient(conn net.Conn, isTLS bool) {
 			return
 		}
 	}
+
+	// =========================================================================
+	// ### 问题1 修正说明 ###
+	// 澄清 `bufio.Reader` 的生命周期问题：
+	// `bufio.Reader` 在设计上会持有底层的 `io.Reader` (即`conn`)。当它的内部缓冲区被读完后，
+	// 它会自动继续从 `conn` 读取。因此，在握手循环后将同一个 `reader` 传递给 `pipeTraffic`，
+	// 功能上是正确的，不会导致数据丢失。`pipeTraffic` 会先消费完 `reader` 缓冲区中
+	// 任何被预读的数据，然后再继续从原始 `conn` 读取新数据。
+	// 这里保持代码不变，但通过此注释澄清了其健壮性。
+	// =========================================================================
+
+	// =========================================================================
+	// ### 问题3 修正点 ###
+	// 启动一个唯一的、更高层的 goroutine 来监控 context 的取消信号。
+	// 当任一方向的 pipe 结束并调用 cancel() 时，这个 goroutine 会被激活，
+	// 并强制关闭两个底层连接，从而迅速中断另一个仍在阻塞的 pipe。
+	// 这取代了之前在每个 pipeTraffic 内部的监控 goroutine，
+	// 将每个连接的监控 goroutine 从 2 个减少到了 1 个，提高了效率。
+	// =========================================================================
+	go func() {
+		<-ctx.Done() // 等待 cancel() 被调用
+		conn.Close()
+		targetConn.Close()
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -707,23 +753,17 @@ func (c *copyTracker) Write(p []byte) (n int, err error) {
 	return
 }
 
-// pipeTraffic - 重构后的版本，更安全、高效，无goroutine泄露风险。
+// ==========================================================
+// --- pipeTraffic (已修正 goroutine 效率问题) ---
+// ==========================================================
 func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.Reader, connKey string, cancel context.CancelFunc, isUpload bool) {
 	defer wg.Done()
-	// 当任一方向的数据流结束（如EOF或错误），立即通知另一方向也停止。
+	// 当任一方向的数据流结束（如EOF或错误），立即通过 cancel() 通知 handleClient
+	// 中的监控goroutine来关闭两个连接，从而中断另一个方向的pipe。
 	defer cancel()
 
-	// 启动一个goroutine来监听context的取消信号
-	go func() {
-		<-ctx.Done()
-		// 通过设置一个过去的截止时间来强制中断阻塞的I/O操作
-		// 这是一种可靠的中断net.Conn读写的方法
-		deadline := time.Now().Add(-1 * time.Second)
-		dst.SetDeadline(deadline)
-		if srcConn, ok := src.(net.Conn); ok {
-			srcConn.SetDeadline(deadline)
-		}
-	}()
+	// ### 问题3 修正点 ###
+	// 移除了内部的监控goroutine，因为它已经被 handleClient 中那个更高层的goroutine取代。
 
 	connInfo, ok := GetActiveConn(connKey)
 	if !ok {
@@ -743,15 +783,17 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 	buf := getBuf(cfg.GetSettings().BufferSize)
 	defer putBuf(buf)
 
-	// 直接在当前goroutine中执行io.CopyBuffer
+	// 直接执行 io.CopyBuffer。我们依赖 cancel() 触发对端连接关闭来中断这个阻塞。
 	_, err := io.CopyBuffer(tracker, src, buf)
 
-	// 错误处理：忽略由SetDeadline中断或正常关闭连接引起的错误
+	// 错误处理：忽略由 context cancel 导致的“use of closed network connection”等预期错误。
 	if err != nil && err != io.EOF {
-		if netErr, ok := err.(net.Error); !(ok && netErr.Timeout()) {
-			if !strings.Contains(err.Error(), "use of closed network connection") {
-				Print("[!] Conn %s pipe error: %v", connKey, err)
-			}
+		select {
+		case <-ctx.Done():
+			// 如果 context 已经关闭，那么这个错误是预期的，无需打印日志。
+		default:
+			// 如果 context 还未关闭，说明这是一个非预期的错误。
+			Print("[!] Conn %s pipe error: %v", connKey, err)
 		}
 	}
 
@@ -760,35 +802,6 @@ func pipeTraffic(ctx context.Context, wg *sync.WaitGroup, dst net.Conn, src io.R
 		_ = tcpDst.CloseWrite()
 	}
 }
-
-func extractHeaderValue(text, name string) string {
-	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
-	m := re.FindStringSubmatch(text)
-	if len(m) > 1 {
-		return strings.TrimSpace(m[1])
-	}
-	return ""
-}
-func isIPInList(ip string, list []string) bool {
-	for _, item := range list {
-		if item == ip {
-			return true
-		}
-	}
-	return false
-}
-func runCommand(command string, args ...string) (bool, string) {
-	cmd := exec.Command(command, args...)
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String())
-	}
-	return true, out.String()
-}
-
 // ==========================================================
 // --- SSH User Management (增强安全性) ---
 // ==========================================================
@@ -808,16 +821,14 @@ func manageSshUser(username, password, action string) (bool, string) {
 	startMarker := fmt.Sprintf("\n# WSTUNNEL_USER_BLOCK_START_%s\n", username)
 	endMarker := fmt.Sprintf("\n# WSTUNNEL_USER_BLOCK_END_%s\n", username)
 
-	// 原子地读取、修改并写回sshd_config
 	atomicUpdateSshdConfig := func(update func(string) string) error {
 		content, err := os.ReadFile(sshdConfigPath)
 		if err != nil {
 			return fmt.Errorf("读取 sshd_config 失败: %w", err)
 		}
-		// 备份
 		backupPath := sshdConfigPath + ".bak." + time.Now().Format("20060102150405")
 		if err := os.WriteFile(backupPath, content, 0644); err != nil {
-			Print("[!] 创建 sshd_config 备份失败: %v", err) // 仅警告
+			Print("[!] 创建 sshd_config 备份失败: %v", err)
 		}
 		newContent := update(string(content))
 		tmpPath := sshdConfigPath + ".tmp"
@@ -827,7 +838,6 @@ func manageSshUser(username, password, action string) (bool, string) {
 		return os.Rename(tmpPath, sshdConfigPath)
 	}
 
-	// 从配置中移除指定用户的配置块
 	cleanUserBlock := func(content string) string {
 		re := regexp.MustCompile(fmt.Sprintf(`(?s)%s.*?%s`, regexp.QuoteMeta(strings.TrimSpace(startMarker)), regexp.QuoteMeta(strings.TrimSpace(endMarker))))
 		return re.ReplaceAllString(content, "")
@@ -869,7 +879,6 @@ func manageSshUser(username, password, action string) (bool, string) {
 		if password == "" {
 			return false, "创建用户时必须提供密码。"
 		}
-		// 清理旧配置并添加新配置
 		err := atomicUpdateSshdConfig(func(content string) string {
 			content = cleanUserBlock(content)
 			newBlock := fmt.Sprintf("%sMatch User %s\n    PasswordAuthentication yes\n    AllowTcpForwarding yes\n    PermitTTY yes\n    AllowAgentForwarding no\n    X11Forwarding no\n    AllowStreamLocalForwarding no\n    ForceCommand /bin/echo 'This account is restricted to tunnel use only.'\n%s", startMarker, username, endMarker)
@@ -1347,7 +1356,6 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
 func main() {
 	go func() {
 		log.Println("Starting pprof server on http://localhost:6060/debug/pprof")
@@ -1355,7 +1363,7 @@ func main() {
 			Print("[!] PPROF: Failed to start pprof server: %v", err)
 		}
 	}()
-	log.SetOutput(io.Discard) // 使用 io.Discard
+	log.SetOutput(io.Discard)
 
 	var err error
 	adminPanelHTML, err = os.ReadFile("admin.html")
@@ -1377,28 +1385,28 @@ func main() {
 
 	runPeriodicTasks()
 
-	// 启动 HTTP 服务
-	httpListener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%d", settings.HTTPPort))
+	// 强制监听IPv4以解决某些环境下双栈监听不生效的问题
+	httpAddr := fmt.Sprintf("0.0.0.0:%d", settings.HTTPPort)
+	httpListener, err := net.Listen("tcp4", httpAddr)
 	if err != nil {
-		Print("[!] FATAL: Failed to listen on HTTP port %d: %v", settings.HTTPPort, err)
+		Print("[!] FATAL: Failed to listen on HTTP port %d (IPv4): %v", settings.HTTPPort, err)
 		os.Exit(1)
 	}
-	Print("[*] WS on %s", httpListener.Addr().String())
+	Print("[*] WS on %s (IPv4)", httpAddr)
 	go func() {
 		for {
 			conn, err := httpListener.Accept()
 			if err != nil {
-				Print("[!] WS accept error: %v", err)
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					break
 				}
+				Print("[!] WS accept error: %v", err)
 				continue
 			}
 			go handleClient(conn, false)
 		}
 	}()
 
-	// 启动 WSS 服务
 	var tlsListener net.Listener
 	if _, err := os.Stat(settings.CertFile); err == nil {
 		if _, err := os.Stat(settings.KeyFile); err == nil {
@@ -1406,20 +1414,20 @@ func main() {
 			if err != nil {
 				Print("[!] Cert warning: %v. WSS server will not start.", err)
 			} else {
-				addr := fmt.Sprintf("0.0.0.0:%d", settings.TLSPort)
-				tlsListener, err = tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}})
+				tlsAddr := fmt.Sprintf("0.0.0.0:%d", settings.TLSPort)
+				tlsListener, err = tls.Listen("tcp4", tlsAddr, &tls.Config{Certificates: []tls.Certificate{cert}})
 				if err != nil {
-					Print("[!] FATAL: Failed to listen on %s (TLS): %v", addr, err)
+					Print("[!] FATAL: Failed to listen on %s (TLS, IPv4): %v", tlsAddr, err)
 				} else {
-					Print("[*] WSS on %s", tlsListener.Addr().String())
+					Print("[*] WSS on %s (IPv4)", tlsAddr)
 					go func() {
 						for {
 							conn, err := tlsListener.Accept()
 							if err != nil {
-								Print("[!] WSS accept error: %v", err)
 								if strings.Contains(err.Error(), "use of closed network connection") {
 									break
 								}
+								Print("[!] WSS accept error: %v", err)
 								continue
 							}
 							go handleClient(conn, true)
@@ -1434,7 +1442,6 @@ func main() {
 		Print("[!] TLS Cert file '%s' not found. WSS server will not start.", settings.CertFile)
 	}
 
-	// 启动管理面板服务
 	adminMux := http.NewServeMux()
 	adminRootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, _ := r.Context().Value("user").(string)
@@ -1457,7 +1464,7 @@ func main() {
 
 	adminAddr := fmt.Sprintf("0.0.0.0:%d", settings.StatusPort)
 	adminServer := &http.Server{Addr: adminAddr, Handler: adminMux}
-	Print("[*] Status on http://127.0.0.1:%d", settings.StatusPort)
+	Print("[*] Status server listening on %s (accessible at http://127.0.0.1:%d)", adminAddr, settings.StatusPort)
 	go func() {
 		if err := adminServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			Print("[!] FATAL: Failed to start admin server on %s: %v", adminAddr, err)
@@ -1465,30 +1472,25 @@ func main() {
 		}
 	}()
 
-	// 实现优雅停机
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	Print("\n[*] Shutting down server...")
 
-	// 停止接受新连接
 	httpListener.Close()
 	if tlsListener != nil {
 		tlsListener.Close()
 	}
 
-	// 给管理面板一个关闭的期限
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := adminServer.Shutdown(ctx); err != nil {
 		Print("[!] Admin server shutdown failed: %v", err)
 	}
 
-	// (可选) 等待现有连接完成，这里简单等待几秒
 	Print("[*] Waiting for existing connections to finish...")
 	time.Sleep(2 * time.Second)
 
-	// 保存最终数据
 	saveDeviceUsage()
 
 	Print("[*] Server gracefully stopped.")
