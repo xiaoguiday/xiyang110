@@ -461,6 +461,12 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 		conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		req, err := http.ReadRequest(reader)
 		if err != nil {
+			// ############ 修正点 1: 增加详细错误日志 ############
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				p.Print("[!] Handshake timeout for %s", remoteIP)
+			} else if err != io.EOF {
+				p.Print("[!] Handshake read error from %s: %v", remoteIP, err)
+			}
 			return
 		}
 
@@ -471,6 +477,7 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 		req.Body = http.MaxBytesReader(nil, req.Body, 64*1024)
 		body, err := io.ReadAll(req.Body)
 		if err != nil {
+			p.Print("[!] Handshake read body error from %s: %v", remoteIP, err)
 			sendHTTPErrorAndClose(conn, http.StatusBadRequest, "Bad Request", "Request body too large or invalid.")
 			return
 		}
@@ -478,25 +485,31 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 		initialData = body
 
 		if p.cfg.Settings.EnableAuth {
-			credential := req.Header.Get("Sec-WebSocket-Key")
+			// ############ 修正点 2: 使用自定义 Header "X-Device-ID" 进行认证 ############
+			credential := req.Header.Get("X-Device-ID")
 			if credential == "" {
-				sendHTTPErrorAndClose(conn, http.StatusUnauthorized, "Unauthorized", "Unauthorized")
+				p.Print("[!] Auth Failed: Missing 'X-Device-ID' header from %s", remoteIP)
+				sendHTTPErrorAndClose(conn, http.StatusUnauthorized, "Unauthorized", "Missing Credentials")
 				return
 			}
+
 			p.cfg.lock.RLock()
 			deviceInfo, found := p.cfg.DeviceIDs[credential]
 			p.cfg.lock.RUnlock()
 
 			if !found {
-				sendHTTPErrorAndClose(conn, http.StatusUnauthorized, "Unauthorized", "Unauthorized")
+				p.Print("[!] Auth Failed: Invalid 'X-Device-ID' [%s] from %s", credential, remoteIP)
+				sendHTTPErrorAndClose(conn, http.StatusUnauthorized, "Unauthorized", "Invalid Credentials")
 				return
 			}
 			if !deviceInfo.Enabled {
+				p.Print("[!] Auth Failed: Device '%s' is disabled for %s", deviceInfo.FriendlyName, remoteIP)
 				sendHTTPErrorAndClose(conn, http.StatusForbidden, "Forbidden", "账号被禁止,请联系管理员解锁")
 				return
 			}
 			expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 			if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
+				p.Print("[!] Auth Failed: Device '%s' has expired for %s", deviceInfo.FriendlyName, remoteIP)
 				sendHTTPErrorAndClose(conn, http.StatusForbidden, "Forbidden", "账号已到期，请联系管理员充值")
 				return
 			}
@@ -509,16 +522,19 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 
 		ua := req.UserAgent()
 		if p.cfg.Settings.UAKeywordProbe != "" && strings.Contains(ua, p.cfg.Settings.UAKeywordProbe) {
+			p.Print("[*] Received probe from %s. Responding OK.", remoteIP)
 			conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 			continue
 		}
 		if p.cfg.Settings.UAKeywordWS != "" && strings.Contains(ua, p.cfg.Settings.UAKeywordWS) {
+			p.Print("[*] WebSocket handshake successful for %s (Device: %s)", remoteIP, connInfo.deviceID)
 			conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
 			handshakeComplete = true
 			break
 		}
 
-		sendHTTPErrorAndClose(conn, http.StatusForbidden, "Forbidden", "Forbidden")
+		p.Print("[!] Handshake Failed: Unrecognized User-Agent '%s' from %s", ua, remoteIP)
+		sendHTTPErrorAndClose(conn, http.StatusForbidden, "Forbidden", "Forbidden User-Agent")
 		return
 	}
 
