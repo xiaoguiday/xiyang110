@@ -125,16 +125,12 @@ type SystemStatus struct {
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
-	if size <= 0 {
-		size = 32 * 1024
-	}
+	if size <= 0 { size = 32 * 1024 }
 	bufferPool = sync.Pool{New: func() interface{} { return make([]byte, size) }}
 }
 func getBuf(size int) []byte {
 	b := bufferPool.Get().([]byte)
-	if cap(b) < size {
-		return make([]byte, size)
-	}
+	if cap(b) < size { return make([]byte, size) }
 	return b[:size]
 }
 func putBuf(b []byte) { bufferPool.Put(b) }
@@ -162,13 +158,9 @@ func (rb *RingBuffer) GetLogs() []string {
 	var logs []string
 	for i := 0; i < len(rb.buffer); i++ {
 		idx := (rb.head + i) % len(rb.buffer)
-		if rb.buffer[idx] != "" {
-			logs = append(logs, rb.buffer[idx])
-		}
+		if rb.buffer[idx] != "" { logs = append(logs, rb.buffer[idx]) }
 	}
-	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
-		logs[i], logs[j] = logs[j], logs[i]
-	}
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 { logs[i], logs[j] = logs[j], logs[i] }
 	return logs
 }
 
@@ -204,32 +196,22 @@ func (c *Config) SaveAtomic() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	tmp := ConfigFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
+	if err := os.WriteFile(tmp, data, 0644); err != nil { return err }
 	return os.Rename(tmp, ConfigFile)
 }
 
 func LoadConfig() (*Config, error) {
 	if _, err := os.Stat(ConfigFile); os.IsNotExist(err) {
 		cfg := defaultConfig()
-		if err := cfg.SaveAtomic(); err != nil {
-			return nil, err
-		}
+		if err := cfg.SaveAtomic(); err != nil { return nil, err }
 		return cfg, nil
 	}
 	data, err := os.ReadFile(ConfigFile)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
 	cfg := &Config{}
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
+	if err := json.Unmarshal(data, cfg); err != nil { return nil, err }
 	return cfg, nil
 }
 // ==========================================================
@@ -659,9 +641,7 @@ func (p *Proxy) runPeriodicTasks() {
 	saveTicker := time.NewTicker(5 * time.Minute)
 	auditTicker := time.NewTicker(30 * time.Second)
 	statusTicker := time.NewTicker(2 * time.Second)
-	defer saveTicker.Stop()
-	defer auditTicker.Stop()
-	defer statusTicker.Stop()
+	defer saveTicker.Stop(); defer auditTicker.Stop(); defer statusTicker.Stop()
 
 	for {
 		select {
@@ -765,26 +745,19 @@ func (p *Proxy) handleAPIServerStatus(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, p.logBuffer.GetLogs())
 }
-func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {
-	// Wrapper for other API calls
-}
-func (p *Proxy) handleAdminPost(w http.ResponseWriter, r *http.Request) {
-	// Wrapper for post actions
-}
+func (p *Proxy) handleAPI(w http.ResponseWriter, r *http.Request) {}
+func (p *Proxy) handleAdminPost(w http.ResponseWriter, r *http.Request) {}
 
 var adminPanelHTML, loginPanelHTML []byte
 var sessions = make(map[string]Session)
 var sessionsLock sync.RWMutex
 type Session struct { Username string; Expiry time.Time }
-
 const sessionCookieName = "wstunnel_session"
 
 func (p *Proxy) authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookieName)
-		if err != nil {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8"); w.Write(loginPanelHTML); return
-		}
+		if err != nil { w.Header().Set("Content-Type", "text/html; charset=utf-8"); w.Write(loginPanelHTML); return }
 		sessionsLock.RLock(); session, ok := sessions[cookie.Value]; sessionsLock.RUnlock()
 		if !ok || time.Now().After(session.Expiry) {
 			if ok { sessionsLock.Lock(); delete(sessions, cookie.Value); sessionsLock.Unlock() }
@@ -796,19 +769,16 @@ func (p *Proxy) authMiddleware(next http.Handler) http.HandlerFunc {
 }
 func (p *Proxy) loginHandler(w http.ResponseWriter, r *http.Request) {
 	var creds struct{ Username string `json:"username"`; Password string `json:"password"`}
-	if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+	if json.NewDecoder(r.Body).Decode(&creds) != nil {
 		sendJSON(w, http.StatusBadRequest, map[string]string{"message": "无效的请求格式"}); return
 	}
 	p.cfg.lock.RLock(); storedPass, ok := p.cfg.Accounts[creds.Username]; p.cfg.lock.RUnlock()
 	if !ok { sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"}); return }
-
 	var valid bool
 	if len(storedPass) >= 60 && strings.HasPrefix(storedPass, "$2a$") {
 		valid = checkPasswordHash(creds.Password, storedPass)
 	} else { valid = (creds.Password == storedPass) }
-
 	if !valid { sendJSON(w, http.StatusUnauthorized, map[string]string{"message": "用户名或密码错误"}); return }
-	
 	sessionTokenBytes := make([]byte, 32); rand.Read(sessionTokenBytes)
 	sessionToken := hex.EncodeToString(sessionTokenBytes)
 	expiry := time.Now().Add(12 * time.Hour)
@@ -845,13 +815,10 @@ func main() {
 	adminMux := http.NewServeMux()
 	if adminPanelHTML != nil && loginPanelHTML != nil {
 		rootHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Header().Set("Content-Type", "text/html; charset=utf-8"); w.Write(adminPanelHTML) })
-		
 		adminMux.HandleFunc("/login", proxy.loginHandler)
 		adminMux.HandleFunc("/logout", proxy.logoutHandler)
-
 		apiHandler := http.HandlerFunc(proxy.handleAPI)
 		adminPostHandler := http.HandlerFunc(proxy.handleAdminPost)
-
 		adminMux.HandleFunc("/api/connections", proxy.handleAPIConnections)
 		adminMux.HandleFunc("/api/server_status", proxy.handleAPIServerStatus)
 		adminMux.HandleFunc("/api/logs", proxy.handleAPILogs)
@@ -884,8 +851,7 @@ func main() {
 }
 
 func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText, body string) {
-	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
-		statusCode, statusText, len(body), body)
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", statusCode, statusText, len(body), body)
 	_, _ = conn.Write([]byte(response))
 	conn.Close()
 }
@@ -898,12 +864,10 @@ func extractHeaderValue(text, name string) string {
 func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
 	response, _ := json.Marshal(payload)
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_, _ = w.Write(response)
+	w.WriteHeader(code); _, _ = w.Write(response)
 }
 func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit { return fmt.Sprintf("%d B", b) }
+	const unit = 1024; if b < unit { return fmt.Sprintf("%d B", b) }
 	div, exp := int64(unit), 0
 	for n := b / unit; n >= unit; n /= unit { div *= unit; exp++ }
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
@@ -912,5 +876,12 @@ func isIPInList(ip string, list []string) bool {
 	for _, item := range list { if item == ip { return true } }
 	return false
 }
-func hashPassword(password string) (string, error) { return "", nil } // Placeholder
-func checkPasswordHash(password, hash string) bool { return false } // Placeholder
+// ############ 修正点: 添加 bcrypt 函数实现 ############
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
