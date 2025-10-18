@@ -1,4 +1,4 @@
-// wstunnel_final_merged_v5.go
+// wstunnel_final_merged_v6_fixed.go
 package main
 
 import (
@@ -40,7 +40,7 @@ const ConfigFile = "ws_config.json"
 const logBufferSize = 200
 
 // ==========================================================
-// --- 核心结构体定义 (与您的“原始代码”保持兼容) ---
+// --- 核心结构体定义 (Core Struct Definitions) ---
 // ==========================================================
 
 type RingBuffer struct {
@@ -49,17 +49,16 @@ type RingBuffer struct {
 	head   int
 }
 
-// 新的 Settings 结构，支持多端口
 type Settings struct {
 	ListenAddrs                  []string `json:"listen_addrs"`
 	AdminListenAddr              string   `json:"admin_listen_addr"`
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	HandshakePeek                int      `json:"handshake_peek"`    // 新增
-	HandshakeTimeout             int      `json:"handshake_timeout"` // 新增 (替代旧的 Timeout)
+	HandshakePeek                int      `json:"handshake_peek"`
+	HandshakeTimeout             int      `json:"handshake_timeout"`
 	IdleTimeout                  int      `json:"idle_timeout"`
-	MaxConns                     int      `json:"max_conns"` // 新增
+	MaxConns                     int      `json:"max_conns"`
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -235,6 +234,46 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+func isIPInList(ip string, list []string) bool {
+	for _, item := range list {
+		if item == ip {
+			return true
+		}
+	}
+	return false
+}
+
+func runCommand(command string, args ...string) (bool, string) {
+	cmd := exec.Command(command, args...)
+	var out, stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String())
+	}
+	return true, out.String()
+}
+
+func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(response)
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
 
 // ==========================================================
 // --- 配置管理 (Config Management with Auto-Migration) ---
@@ -272,7 +311,7 @@ func LoadConfig() (*Config, error) {
 		DefaultTargetPort:            22,
 		BufferSize:                   32768,
 		HandshakePeek:                512,
-		HandshakeTimeout:             10, // 增加默认超时以提高兼容性
+		HandshakeTimeout:             10,
 		IdleTimeout:                  300,
 		MaxConns:                     4096,
 		CertFile:                     "/etc/stunnel/certs/stunnel.pem",
@@ -300,23 +339,19 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	// 尝试直接解析为新结构
 	var newCfg Config
 	if json.Unmarshal(data, &newCfg) == nil && len(newCfg.Settings.ListenAddrs) > 0 {
 		Print("[*] Loaded config in new format.")
 		return &newCfg, nil
 	}
 
-	// 如果失败，则尝试从旧结构迁移
 	Print("[*] Old config format detected. Migrating to new format...")
 	
-	// 先将已有数据加载到默认配置上
 	migratedCfg := &Config{ Settings: defaultSettings }
 	if err := json.Unmarshal(data, migratedCfg); err != nil {
 		Print("[!] Warning: could not fully unmarshal old config data, some defaults may be used. Error: %v", err)
 	}
-
-	// 单独解析旧的端口结构以进行迁移
+	
 	var oldPortCfg struct {
 		Settings struct {
 			HTTPPort   int `json:"http_port"`
@@ -325,7 +360,7 @@ func LoadConfig() (*Config, error) {
 		} `json:"settings"`
 	}
 	if err := json.Unmarshal(data, &oldPortCfg); err == nil {
-		migratedCfg.Settings.ListenAddrs = []string{} // 清空默认值
+		migratedCfg.Settings.ListenAddrs = []string{}
 		if oldPortCfg.Settings.HTTPPort > 0 {
 			migratedCfg.Settings.ListenAddrs = append(migratedCfg.Settings.ListenAddrs, fmt.Sprintf("0.0.0.0:%d", oldPortCfg.Settings.HTTPPort))
 		}
@@ -516,7 +551,7 @@ func (p *Proxy) handleConn(client net.Conn) {
 	peekedBytes, err := reader.Peek(1)
 	client.SetReadDeadline(time.Time{})
 	if err != nil {
-		if err != io.EOF {
+		if err != io.EOF && !strings.Contains(err.Error(), "timed out") {
 			Print("[-] Conn %s failed to peek initial byte: %v", connKey, err)
 		}
 		return
@@ -643,6 +678,7 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, req *http.Request, info *Act
 	}
 	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
 	ua := req.UserAgent()
+
 	if settings.UAKeywordWS != "" && strings.Contains(ua, ua) {
 		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
 		info.Status = "活跃"
@@ -655,6 +691,10 @@ func (p *Proxy) handleHTTPConnection(conn net.Conn, req *http.Request, info *Act
 		sendHTTPErrorAndClose(conn, 403, "Forbidden", "Forbidden")
 	}
 }
+
+// ==========================================================
+// --- 数据转发逻辑 (Traffic Forwarding Logic) ---
+// ==========================================================
 
 func (p *Proxy) forwardConnection(client net.Conn, info *ActiveConnInfo, targetAddr string, initialData []byte) {
 	Print("[*] Tunneling %s -> %s for device %s", info.IP, targetAddr, info.DeviceID)
@@ -775,14 +815,18 @@ func main() {
 			log.Fatalf("[!] admin server failed: %v", err)
 		}
 	}()
+
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
 	Print("[*] Shutdown requested...")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	adminServer.Shutdown(ctx)
+
 	proxy.Stop()
+	adminServer.Shutdown(ctx)
+
 	Print("[*] Shutdown complete.")
 }
 
