@@ -1,3 +1,4 @@
+// wstunnel_final_merged_v7_CORRECTED.go
 package main
 
 import (
@@ -182,7 +183,7 @@ func init() {
 }
 
 // ==========================================================
-// --- 基础辅助函数 (Basic Helper Functions) ---
+// --- 基础辅助函数 (Basic Helper Functions) - [FIXED ORDER] ---
 // ==========================================================
 
 func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{buffer: make([]string, capacity)} }
@@ -273,6 +274,25 @@ func formatBytes(b int64) string {
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
+
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+func InitMetrics() {
+	cfg := GetConfig()
+	devices := cfg.GetDeviceIDs()
+	for id, info := range devices {
+		newUsage := info.UsedBytes
+		deviceUsage.Store(id, &newUsage)
+	}
+}
+
 
 // ==========================================================
 // --- 配置管理 (Config Management with Auto-Migration) ---
@@ -551,8 +571,6 @@ func (p *Proxy) handleConn(client net.Conn) {
 	client.SetReadDeadline(time.Time{})
 	if err != nil {
 		if err != io.EOF && !strings.Contains(err.Error(), "timed out") {
-			// reader.Peek may return this on timeout, not a critical error for sniffing
-		} else if err != io.EOF {
 			Print("[-] Conn %s failed to peek initial byte: %v", connKey, err)
 		}
 		return
@@ -1462,4 +1480,4 @@ func compareStringSlices(a, b []string) bool {
 		}
 	}
 	return true
-}
+}									
