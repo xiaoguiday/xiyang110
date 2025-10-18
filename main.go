@@ -349,14 +349,7 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 
-	if p.cfg.Settings.EnableIPBlacklist && isIPInList(remoteIP, p.cfg.Settings.IPBlacklist) {
-		p.Print("[-] Connection from blacklisted IP %s rejected.", remoteIP)
-		return
-	}
-	if p.cfg.Settings.EnableIPWhitelist && !isIPInList(remoteIP, p.cfg.Settings.IPWhitelist) {
-		p.Print("[-] Connection from non-whitelisted IP %s rejected.", remoteIP)
-		return
-	}
+	// ... IP 黑白名单检查 ...
 
 	p.Print("[+] Connection opened from %s", remoteIP)
 
@@ -364,15 +357,24 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(timeout))
 
 	reader := bufio.NewReader(conn)
-	peekedBytes, err := reader.Peek(p.cfg.Settings.HandshakePeek)
+	// ===================== 修正点 =====================
+	_, err := reader.Peek(p.cfg.Settings.HandshakePeek)
 	if err != nil {
-		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
-			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-			}
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			p.Print("[-] Handshake timeout for %s after %v", remoteIP, timeout)
+		} else if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
+			// 记录其他非预期的 Peek 错误
+			p.Print("[!] Handshake peek error from %s: %v", remoteIP, err)
 		}
+		// 如果 Peek 失败（无论何种原因），就直接返回，不再继续处理
 		return
 	}
-	conn.SetReadDeadline(time.Time{})
+	// ================================================
+	
+	// 如果 Peek 成功，再读取真实数据
+	peekedBytes, _ := reader.Peek(p.cfg.Settings.HandshakePeek) // 此时不会再报错
+
+	conn.SetReadDeadline(time.Time{}) // 清除超时设置
 
 	if isTLS(peekedBytes) {
 		p.handleTLSConnection(conn, reader)
@@ -382,29 +384,23 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 		p.handleDirectConnection(conn, reader)
 	}
 }
+```**请注意**：在上面的修正代码中，我先用 `reader.Peek` 来探测错误，如果成功，再用一次 `reader.Peek` 获取数据。这是因为第一次 `Peek` 成功后，数据仍在缓冲区中，第二次 `Peek` 会立即返回相同的数据而不会产生新的IO或错误。
 
-func (p *Proxy) acquire() bool {
-	select {
-	case p.connSemaphore <- struct{}{}:
-		return true
-	default:
-		return false
-	}
-}
+### **重要：认证逻辑变更提醒**
 
-func (p *Proxy) release() {
-	<-p.connSemaphore
-}
+在您重构后的代码中，我注意到一个非常重要的逻辑变更，这很可能是您修复超时问题后遇到的**下一个问题**。
 
-func isTLS(peekedBytes []byte) bool {
-	return len(peekedBytes) > 5 && peekedBytes[0] == 0x16 && peekedBytes[1] == 0x03
-}
+*   **旧代码**: 认证凭证是通过 `Sec-WebSocket-Key` 这个标准的 WebSocket 头来传递的。
+*   **新代码**: 在 `handleHTTPPayloadConnection` 函数中，认证凭证改为了通过一个自定义的 `X-Device-ID` 头来传递。
 
-func isHTTP(peekedBytes []byte) bool {
-	s := string(peekedBytes)
-	return strings.HasPrefix(s, "GET ") || strings.HasPrefix(s, "POST ") ||
-		strings.HasPrefix(s, "PUT ") || strings.HasPrefix(s, "HEAD ") ||
-		strings.HasPrefix(s, "OPTIONS ") || strings.HasPrefix(s, "DELETE ")
+```go
+// in handleHTTPPayloadConnection
+// ############ 修正点 2: 使用自定义 Header "X-Device-ID" 进行认证 ############
+credential := req.Header.Get("X-Device-ID")
+if credential == "" {
+    p.Print("[!] Auth Failed: Missing 'X-Device-ID' header from %s", remoteIP)
+    sendHTTPErrorAndClose(conn, http.StatusUnauthorized, "Unauthorized", "Missing Credentials")
+    return
 }
 // ==========================================================
 // --- 3. 协议处理器和核心转发逻辑 ---
