@@ -86,7 +86,7 @@ type Proxy struct {
 	deviceUsage         sync.Map
 	tlsConfig           *tls.Config
 	connSemaphore       chan struct{}
-	listeners           []net.Listener // <--- 修正点: 添加 listeners 字段
+	listeners           []net.Listener
 	globalBytesSent     int64
 	globalBytesReceived int64
 	logBuffer           *RingBuffer
@@ -323,11 +323,10 @@ func (p *Proxy) acceptLoop(l net.Listener) {
 			case <-p.ctx.Done():
 				return
 			default:
-				// Don't log "use of closed network connection" error on shutdown
 				if !strings.Contains(err.Error(), "use of closed network connection") {
 					p.Print("[!] accept error on %s: %v", l.Addr().String(), err)
 				}
-				return // Exit loop on any accept error
+				return
 			}
 		}
 
@@ -369,7 +368,6 @@ func (p *Proxy) handleConnection(conn net.Conn) {
 	if err != nil {
 		if netErr, ok := err.(net.Error); !ok || !netErr.Timeout() {
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-				// p.Print("[-] Peek error from %s: %v", remoteIP, err)
 			}
 		}
 		return
@@ -615,7 +613,6 @@ func (p *Proxy) pipeTraffic(wg *sync.WaitGroup, dst net.Conn, src io.Reader, con
 		case <-p.ctx.Done():
 		default:
 			if err != io.EOF && !strings.Contains(err.Error(), "use of closed network connection") {
-				// p.Print("[!] Pipe error for conn %s: %v", connInfo.connKey, err)
 			}
 		}
 	}
@@ -844,9 +841,9 @@ func main() {
 		adminMux.HandleFunc("/logout", proxy.logoutHandler)
 		apiHandler := http.HandlerFunc(proxy.handleAPI)
 		adminPostHandler := http.HandlerFunc(proxy.handleAdminPost)
-		adminMux.HandleFunc("/api/connections", proxy.handleAPIConnections)
-		adminMux.HandleFunc("/api/server_status", proxy.handleAPIServerStatus)
-		adminMux.HandleFunc("/api/logs", proxy.handleAPILogs)
+		adminMux.HandleFunc("/api/connections", proxy.authMiddleware(http.HandlerFunc(proxy.handleAPIConnections)))
+		adminMux.HandleFunc("/api/server_status", proxy.authMiddleware(http.HandlerFunc(proxy.handleAPIServerStatus)))
+		adminMux.HandleFunc("/api/logs", proxy.authMiddleware(http.HandlerFunc(proxy.handleAPILogs)))
 		adminMux.Handle("/api/", proxy.authMiddleware(apiHandler))
 		adminMux.Handle("/device/", proxy.authMiddleware(adminPostHandler))
 		adminMux.Handle("/account/", proxy.authMiddleware(adminPostHandler))
@@ -877,5 +874,35 @@ func main() {
 
 func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText, body string) {
 	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", statusCode, statusText, len(body), body)
-	_, _ = conn
+	_, _ = conn.Write([]byte(response))
+	conn.Close()
+}
+func extractHeaderValue(text, name string) string {
+	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
+	m := re.FindStringSubmatch(text)
+	if len(m) > 1 { return strings.TrimSpace(m[1]) }
+	return ""
+}
+func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
+	response, _ := json.Marshal(payload)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code); _, _ = w.Write(response)
+}
+func formatBytes(b int64) string {
+	const unit = 1024; if b < unit { return fmt.Sprintf("%d B", b) }
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit { div *= unit; exp++ }
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+func isIPInList(ip string, list []string) bool {
+	for _, item := range list { if item == ip { return true } }
+	return false
+}
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+func checkPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
 }
