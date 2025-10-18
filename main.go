@@ -1,4 +1,4 @@
-// wstunnel_final_merged.go
+// wstunnel_final_merged_v5.go
 package main
 
 import (
@@ -39,23 +39,9 @@ const defaultBufferSize = 32 * 1024
 const ConfigFile = "ws_config.json"
 const logBufferSize = 200
 
-var (
-	logBuffer           *RingBuffer
-	globalConfig        *Config
-	once                sync.Once
-	globalBytesSent     int64
-	globalBytesReceived int64
-	activeConns         sync.Map
-	deviceUsage         sync.Map
-	startTime           = time.Now()
-	systemStatus        SystemStatus
-	systemStatusMutex   sync.RWMutex
-	adminPanelHTML      []byte
-	loginPanelHTML      []byte
-	smallPool           sync.Pool
-	largePool           sync.Pool
-	totalConns          int64
-)
+// ==========================================================
+// --- 核心结构体定义 (与您的“原始代码”保持兼容) ---
+// ==========================================================
 
 type RingBuffer struct {
 	mu     sync.RWMutex
@@ -63,47 +49,17 @@ type RingBuffer struct {
 	head   int
 }
 
-func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{buffer: make([]string, capacity)} }
-func (rb *RingBuffer) Add(msg string) {
-	rb.mu.Lock()
-	defer rb.mu.Unlock()
-	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg)
-	rb.buffer[rb.head] = logLine
-	rb.head = (rb.head + 1) % len(rb.buffer)
-	fmt.Println(logLine)
-}
-func (rb *RingBuffer) GetLogs() []string {
-	rb.mu.RLock()
-	defer rb.mu.RUnlock()
-	var logs []string
-	for i := 0; i < len(rb.buffer); i++ {
-		idx := (rb.head + i) % len(rb.buffer)
-		if rb.buffer[idx] != "" {
-			logs = append(logs, rb.buffer[idx])
-		}
-	}
-	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
-		logs[i], logs[j] = logs[j], logs[i]
-	}
-	return logs
-}
-func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
-
-func init() {
-	log.SetOutput(ioutil.Discard)
-	logBuffer = NewRingBuffer(logBufferSize)
-}
-
+// 新的 Settings 结构，支持多端口
 type Settings struct {
 	ListenAddrs                  []string `json:"listen_addrs"`
 	AdminListenAddr              string   `json:"admin_listen_addr"`
 	DefaultTargetHost            string   `json:"default_target_host"`
 	DefaultTargetPort            int      `json:"default_target_port"`
 	BufferSize                   int      `json:"buffer_size"`
-	HandshakePeek                int      `json:"handshake_peek"`
-	HandshakeTimeout             int      `json:"handshake_timeout"`
+	HandshakePeek                int      `json:"handshake_peek"`    // 新增
+	HandshakeTimeout             int      `json:"handshake_timeout"` // 新增 (替代旧的 Timeout)
 	IdleTimeout                  int      `json:"idle_timeout"`
-	MaxConns                     int      `json:"max_conns"`
+	MaxConns                     int      `json:"max_conns"` // 新增
 	CertFile                     string   `json:"cert_file"`
 	KeyFile                      string   `json:"key_file"`
 	UAKeywordWS                  string   `json:"ua_keyword_ws"`
@@ -134,6 +90,156 @@ type Config struct {
 	lock      sync.RWMutex          `json:"-"`
 }
 
+type ActiveConnInfo struct {
+	Writer                 net.Conn
+	LastActive             int64
+	DeviceID               string
+	Credential             string
+	FirstConnection        time.Time
+	Status                 string
+	IP                     string
+	BytesSent              int64
+	BytesReceived          int64
+	ConnKey                string
+	LastSpeedUpdateTime    time.Time
+	LastTotalBytesForSpeed int64
+	CurrentSpeedBps        float64
+}
+
+type SystemStatus struct {
+	Uptime        string  `json:"uptime"`
+	CPUPercent    float64 `json:"cpu_percent"`
+	CPUCores      int     `json:"cpu_cores"`
+	MemTotal      uint64  `json:"mem_total"`
+	MemUsed       uint64  `json:"mem_used"`
+	MemPercent    float64 `json:"mem_percent"`
+	BytesSent     int64   `json:"bytes_sent"`
+	BytesReceived int64   `json:"bytes_received"`
+}
+
+type copyTracker struct {
+	io.Writer
+	ConnInfo       *ActiveConnInfo
+	IsUpload       bool
+	DeviceUsagePtr *int64
+}
+
+type Proxy struct {
+	cfg    *Config
+	sem    chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	cert   tls.Certificate
+}
+
+type Session struct {
+	Username string
+	Expiry   time.Time
+}
+
+type APIConnectionResponse struct {
+	DeviceID     string `json:"device_id"`
+	Status       string `json:"status"`
+	SentStr      string `json:"sent_str"`
+	RcvdStr      string `json:"rcvd_str"`
+	SpeedStr     string `json:"speed_str"`
+	RemainingStr string `json:"remaining_str"`
+	Expiry       string `json:"expiry"`
+	IP           string `json:"ip"`
+	FirstConn    string `json:"first_conn"`
+	LastActive   string `json:"last_active"`
+	ConnKey      string `json:"conn_key"`
+}
+
+// ==========================================================
+// --- 全局变量与初始化 (Globals & Initialization) ---
+// ==========================================================
+
+var (
+	logBuffer           *RingBuffer
+	globalConfig        *Config
+	once                sync.Once
+	globalBytesSent     int64
+	globalBytesReceived int64
+	activeConns         sync.Map
+	deviceUsage         sync.Map
+	startTime           = time.Now()
+	systemStatus        SystemStatus
+	systemStatusMutex   sync.RWMutex
+	adminPanelHTML      []byte
+	loginPanelHTML      []byte
+	smallPool           sync.Pool
+	largePool           sync.Pool
+	totalConns          int64
+	sessions            = make(map[string]Session)
+	sessionsLock        sync.RWMutex
+)
+
+const sessionCookieName = "wstunnel_session"
+
+func init() {
+	log.SetOutput(ioutil.Discard)
+	logBuffer = NewRingBuffer(logBufferSize)
+}
+
+// ==========================================================
+// --- 基础辅助函数 (Basic Helper Functions) ---
+// ==========================================================
+
+func NewRingBuffer(capacity int) *RingBuffer { return &RingBuffer{buffer: make([]string, capacity)} }
+func (rb *RingBuffer) Add(msg string) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	logLine := fmt.Sprintf("[%s] %s", time.Now().Format("2006-01-02 15:04:05"), msg)
+	rb.buffer[rb.head] = logLine
+	rb.head = (rb.head + 1) % len(rb.buffer)
+	fmt.Println(logLine)
+}
+func (rb *RingBuffer) GetLogs() []string {
+	rb.mu.RLock()
+	defer rb.mu.RUnlock()
+	var logs []string
+	for i := 0; i < len(rb.buffer); i++ {
+		idx := (rb.head + i) % len(rb.buffer)
+		if rb.buffer[idx] != "" {
+			logs = append(logs, rb.buffer[idx])
+		}
+	}
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
+		logs[i], logs[j] = logs[j], logs[i]
+	}
+	return logs
+}
+func Print(format string, v ...interface{}) { logBuffer.Add(fmt.Sprintf(format, v...)) }
+
+func AddActiveConn(key string, conn *ActiveConnInfo) { activeConns.Store(key, conn) }
+func RemoveActiveConn(key string)                 { activeConns.Delete(key) }
+func GetActiveConn(key string) (*ActiveConnInfo, bool) {
+	if val, ok := activeConns.Load(key); ok {
+		return val.(*ActiveConnInfo), true
+	}
+	return nil, false
+}
+
+func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText string, body string) {
+	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s",
+		statusCode, statusText, len(body), body)
+	_, _ = conn.Write([]byte(response))
+	conn.Close()
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+
+// ==========================================================
+// --- 配置管理 (Config Management with Auto-Migration) ---
+// ==========================================================
+
 func GetConfig() *Config {
 	once.Do(func() {
 		var err error
@@ -145,10 +251,9 @@ func GetConfig() *Config {
 	})
 	return globalConfig
 }
-
 func (c *Config) SaveAtomic() error {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
+	c.lock.Lock()
+	defer c.lock.Unlock()
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
@@ -159,35 +264,35 @@ func (c *Config) SaveAtomic() error {
 	}
 	return os.Rename(tmp, ConfigFile)
 }
-
 func LoadConfig() (*Config, error) {
-	defaultCfg := &Config{
-		Settings: Settings{
-			ListenAddrs:                  []string{"0.0.0.0:80", "0.0.0.0:443"},
-			AdminListenAddr:              "127.0.0.1:9090",
-			DefaultTargetHost:            "127.0.0.1",
-			DefaultTargetPort:            22,
-			BufferSize:                   defaultBufferSize,
-			HandshakePeek:                512,
-			HandshakeTimeout:             5,
-			IdleTimeout:                  300,
-			MaxConns:                     4096,
-			CertFile:                     "/etc/stunnel/certs/stunnel.pem",
-			KeyFile:                      "/etc/stunnel/certs/stunnel.key",
-			UAKeywordWS:                  "26.4.0",
-			UAKeywordProbe:               "probe",
-			AllowSimultaneousConnections: false,
-			EnableDeviceIDAuth:           true,
-			DefaultExpiryDays:            30,
-			DefaultLimitGB:               100,
-		},
-		DeviceIDs: make(map[string]DeviceInfo),
-		Accounts:  map[string]string{"admin": "admin"},
+	defaultSettings := Settings{
+		ListenAddrs:                  []string{"0.0.0.0:80", "0.0.0.0:443"},
+		AdminListenAddr:              "127.0.0.1:9090",
+		DefaultTargetHost:            "127.0.0.1",
+		DefaultTargetPort:            22,
+		BufferSize:                   32768,
+		HandshakePeek:                512,
+		HandshakeTimeout:             10, // 增加默认超时以提高兼容性
+		IdleTimeout:                  300,
+		MaxConns:                     4096,
+		CertFile:                     "/etc/stunnel/certs/stunnel.pem",
+		KeyFile:                      "/etc/stunnel/certs/stunnel.key",
+		UAKeywordWS:                  "26.4.0",
+		UAKeywordProbe:               "probe",
+		AllowSimultaneousConnections: false,
+		EnableDeviceIDAuth:           true,
+		DefaultExpiryDays:            30,
+		DefaultLimitGB:               100,
 	}
 
 	if _, err := os.Stat(ConfigFile); os.IsNotExist(err) {
 		Print("[*] %s not found, creating with default structure.", ConfigFile)
-		return defaultCfg, defaultCfg.SaveAtomic()
+		cfg := &Config{
+			Settings:  defaultSettings,
+			DeviceIDs: make(map[string]DeviceInfo),
+			Accounts:  map[string]string{"admin": "admin"},
+		}
+		return cfg, cfg.SaveAtomic()
 	}
 
 	data, err := os.ReadFile(ConfigFile)
@@ -195,33 +300,40 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	// 尝试直接解析为新结构
 	var newCfg Config
 	if json.Unmarshal(data, &newCfg) == nil && len(newCfg.Settings.ListenAddrs) > 0 {
 		Print("[*] Loaded config in new format.")
 		return &newCfg, nil
 	}
 
+	// 如果失败，则尝试从旧结构迁移
 	Print("[*] Old config format detected. Migrating to new format...")
-	var oldRawCfg map[string]interface{}
-	if err := json.Unmarshal(data, &oldRawCfg); err != nil {
-		return nil, fmt.Errorf("failed to parse old config format: %v", err)
-	}
-
-	migratedCfg := defaultCfg
+	
+	// 先将已有数据加载到默认配置上
+	migratedCfg := &Config{ Settings: defaultSettings }
 	if err := json.Unmarshal(data, migratedCfg); err != nil {
-		Print("[!] Warning: could not fully unmarshal old config, some defaults may be used. Error: %v", err)
+		Print("[!] Warning: could not fully unmarshal old config data, some defaults may be used. Error: %v", err)
 	}
 
-	if settings, ok := oldRawCfg["settings"].(map[string]interface{}); ok {
-		migratedCfg.Settings.ListenAddrs = []string{}
-		if httpPort, ok := settings["http_port"].(float64); ok && httpPort > 0 {
-			migratedCfg.Settings.ListenAddrs = append(migratedCfg.Settings.ListenAddrs, fmt.Sprintf("0.0.0.0:%.0f", httpPort))
+	// 单独解析旧的端口结构以进行迁移
+	var oldPortCfg struct {
+		Settings struct {
+			HTTPPort   int `json:"http_port"`
+			TLSPort    int `json:"tls_port"`
+			StatusPort int `json:"status_port"`
+		} `json:"settings"`
+	}
+	if err := json.Unmarshal(data, &oldPortCfg); err == nil {
+		migratedCfg.Settings.ListenAddrs = []string{} // 清空默认值
+		if oldPortCfg.Settings.HTTPPort > 0 {
+			migratedCfg.Settings.ListenAddrs = append(migratedCfg.Settings.ListenAddrs, fmt.Sprintf("0.0.0.0:%d", oldPortCfg.Settings.HTTPPort))
 		}
-		if tlsPort, ok := settings["tls_port"].(float64); ok && tlsPort > 0 {
-			migratedCfg.Settings.ListenAddrs = append(migratedCfg.Settings.ListenAddrs, fmt.Sprintf("0.0.0.0:%.0f", tlsPort))
+		if oldPortCfg.Settings.TLSPort > 0 {
+			migratedCfg.Settings.ListenAddrs = append(migratedCfg.Settings.ListenAddrs, fmt.Sprintf("0.0.0.0:%d", oldPortCfg.Settings.TLSPort))
 		}
-		if statusPort, ok := settings["status_port"].(float64); ok && statusPort > 0 {
-			migratedCfg.Settings.AdminListenAddr = fmt.Sprintf("0.0.0.0:%.0f", statusPort)
+		if oldPortCfg.Settings.StatusPort > 0 {
+			migratedCfg.Settings.AdminListenAddr = fmt.Sprintf("0.0.0.0:%d", oldPortCfg.Settings.StatusPort)
 		}
 	}
 
@@ -231,11 +343,15 @@ func LoadConfig() (*Config, error) {
 	}
 	return migratedCfg, nil
 }
-
 func (c *Config) GetSettings() Settings              { c.lock.RLock(); defer c.lock.RUnlock(); return c.Settings }
 func (c *Config) GetAccounts() map[string]string     { c.lock.RLock(); defer c.lock.RUnlock(); return c.Accounts }
 func (c *Config) GetDeviceIDs() map[string]DeviceInfo { c.lock.RLock(); defer c.lock.RUnlock(); return c.DeviceIDs }
 func (c *Config) SafeSave() error                    { c.lock.Lock(); defer c.lock.Unlock(); return c.SaveAtomic() }
+
+
+// ==========================================================
+// --- 缓冲区池 (Buffer Pools) ---
+// ==========================================================
 
 func initPools(defaultSize int) {
 	sz := defaultSize
@@ -264,14 +380,9 @@ func putBuf(b *[]byte) {
 	}
 }
 
-type Proxy struct {
-	cfg    *Config
-	sem    chan struct{}
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	cert   tls.Certificate
-}
+// ==========================================================
+// --- 核心代理架构 (Proxy Core Architecture) ---
+// ==========================================================
 
 func NewProxy(cfg *Config) (*Proxy, error) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -352,6 +463,10 @@ func (p *Proxy) Start() error {
 	return nil
 }
 func (p *Proxy) Stop() { p.cancel(); p.wg.Wait() }
+// ==========================================================
+// --- 统一连接处理器与流量转发 (Connection Handler & Forwarding) ---
+// ==========================================================
+
 func (p *Proxy) handleConn(client net.Conn) {
 	remoteIP, _, _ := net.SplitHostPort(client.RemoteAddr().String())
 	connKey := fmt.Sprintf("%s-%s", remoteIP, randomHex(4))
@@ -367,7 +482,7 @@ func (p *Proxy) handleConn(client net.Conn) {
 	defer func() {
 		removeActiveConn(connKey)
 		client.Close()
-		Print("[-] Conn %s closed", connKey)
+		Print("[-] Conn %s closed for %s", connKey, remoteIP)
 	}()
 
 	if tcpConn, ok := client.(*net.TCPConn); ok {
@@ -386,11 +501,15 @@ func (p *Proxy) handleConn(client net.Conn) {
 		return
 	}
 	Print("[+] Conn %s opened from %s", connKey, remoteIP)
-	
+
 	peekSize := settings.HandshakePeek
-	if peekSize <= 0 { peekSize = 512 }
+	if peekSize <= 0 {
+		peekSize = 512
+	}
 	handshakeTO := time.Duration(settings.HandshakeTimeout) * time.Second
-	if handshakeTO <= 0 { handshakeTO = 5 * time.Second }
+	if handshakeTO <= 0 {
+		handshakeTO = 10 * time.Second
+	}
 
 	reader := bufio.NewReader(client)
 	client.SetReadDeadline(time.Now().Add(handshakeTO))
@@ -403,7 +522,8 @@ func (p *Proxy) handleConn(client net.Conn) {
 		return
 	}
 
-	if p.cert.Certificate != nil && peekedBytes[0] == 0x16 {
+	isTLSHandshake := p.cert.Certificate != nil && peekedBytes[0] == 0x16
+	if isTLSHandshake {
 		Print("[*] Conn %s detected TLS handshake", connKey)
 		tlsConn := tls.Server(client, &tls.Config{Certificates: []tls.Certificate{p.cert}})
 		client.SetReadDeadline(time.Now().Add(handshakeTO))
@@ -422,11 +542,18 @@ func (p *Proxy) handleConn(client net.Conn) {
 		Print("[*] Conn %s is not a valid HTTP request, treating as Direct TCP/SSH.", connKey)
 		info.DeviceID = "Direct TCP"
 		info.Status = "活跃"
-		p.forwardDirectTCP(client, reader, info)
+		p.forwardDirectTCP(client, info)
 		return
 	}
 
 	info.Status = "HTTP握手"
+	p.handleHTTPConnection(client, req, info)
+}
+
+func (p *Proxy) handleHTTPConnection(conn net.Conn, req *http.Request, info *ActiveConnInfo) {
+	cfg := p.cfg
+	settings := cfg.Settings
+	remoteIP := info.IP
 
 	body, _ := ioutil.ReadAll(req.Body)
 	credential := req.Header.Get("Sec-WebSocket-Key")
@@ -439,7 +566,8 @@ func (p *Proxy) handleConn(client net.Conn) {
 		if found {
 			info.DeviceID = deviceInfo.FriendlyName
 		}
-	} else {
+	}
+	if info.DeviceID == "" {
 		info.DeviceID = remoteIP
 	}
 	info.Credential = credential
@@ -447,18 +575,18 @@ func (p *Proxy) handleConn(client net.Conn) {
 	if settings.EnableDeviceIDAuth {
 		if !found {
 			Print("[!] Auth Enabled: Invalid Sec-WebSocket-Key from %s. Rejecting.", remoteIP)
-			sendHTTPErrorAndClose(client, 401, "Unauthorized", "Unauthorized")
+			sendHTTPErrorAndClose(conn, 401, "Unauthorized", "Unauthorized")
 			return
 		}
 		if !deviceInfo.Enabled {
 			Print("[!] Auth Enabled: Device '%s' is disabled. Rejecting.", info.DeviceID)
-			sendHTTPErrorAndClose(client, 403, "Forbidden", "账号被禁止,请联系管理员解锁")
+			sendHTTPErrorAndClose(conn, 403, "Forbidden", "账号被禁止,请联系管理员解锁")
 			return
 		}
 		expiry, err := time.Parse("2006-01-02", deviceInfo.Expiry)
 		if err != nil || time.Now().After(expiry.Add(24*time.Hour)) {
 			Print("[!] Auth Enabled: Device '%s' has expired. Rejecting.", info.DeviceID)
-			sendHTTPErrorAndClose(client, 403, "Forbidden", "账号已到期，请联系管理员充值")
+			sendHTTPErrorAndClose(conn, 403, "Forbidden", "账号已到期，请联系管理员充值")
 			return
 		}
 		var deviceUsagePtr *int64
@@ -471,7 +599,7 @@ func (p *Proxy) handleConn(client net.Conn) {
 		}
 		if deviceInfo.LimitGB > 0 && atomic.LoadInt64(deviceUsagePtr) >= int64(deviceInfo.LimitGB)*1024*1024*1024 {
 			Print("[!] Auth Enabled: Traffic limit reached for '%s'. Rejecting.", info.DeviceID)
-			sendHTTPErrorAndClose(client, 403, "Forbidden", "流量已耗尽，联系管理员充值")
+			sendHTTPErrorAndClose(conn, 403, "Forbidden", "流量已耗尽，联系管理员充值")
 			return
 		}
 	}
@@ -479,8 +607,8 @@ func (p *Proxy) handleConn(client net.Conn) {
 	if !settings.AllowSimultaneousConnections && credential != "" && found {
 		var existingSessionCount int
 		activeConns.Range(func(key, value interface{}) bool {
-			if conn, ok := value.(*ActiveConnInfo); ok {
-				if conn.Credential == credential && conn.Status == "活跃" {
+			if c, ok := value.(*ActiveConnInfo); ok {
+				if c.Credential == credential && c.Status == "活跃" {
 					existingSessionCount++
 				}
 			}
@@ -489,10 +617,9 @@ func (p *Proxy) handleConn(client net.Conn) {
 			}
 			return true
 		})
-
 		if deviceInfo.MaxSessions > 0 && existingSessionCount >= deviceInfo.MaxSessions {
 			Print("[!] Auth: Device '%s' has reached its max session limit (%d). Rejecting.", info.DeviceID, deviceInfo.MaxSessions)
-			sendHTTPErrorAndClose(client, 409, "Conflict", fmt.Sprintf("该设备已达最大在线数 (%d)，请稍后再试", deviceInfo.MaxSessions))
+			sendHTTPErrorAndClose(conn, 409, "Conflict", fmt.Sprintf("该设备已达最大在线数 (%d)，请稍后再试", deviceInfo.MaxSessions))
 			return
 		}
 	}
@@ -515,18 +642,17 @@ func (p *Proxy) handleConn(client net.Conn) {
 		}
 	}
 	targetAddr := fmt.Sprintf("%s:%d", targetHost, targetPort)
-
 	ua := req.UserAgent()
-	if settings.UAKeywordWS != "" && strings.Contains(ua, settings.UAKeywordWS) {
-		client.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
+	if settings.UAKeywordWS != "" && strings.Contains(ua, ua) {
+		conn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"))
 		info.Status = "活跃"
-		p.forwardConnection(client, info, targetAddr, body)
-	} else if settings.UAKeywordProbe != "" && strings.Contains(ua, settings.UAKeywordProbe) {
+		p.forwardConnection(conn, info, targetAddr, body)
+	} else if settings.UAKeywordProbe != "" && strings.Contains(ua, ua) {
 		Print("[*] Received probe from %s for device '%s'. Responding OK.", remoteIP, info.DeviceID)
-		client.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
+		conn.Write([]byte("HTTP/1.1 200 OK\r\n\r\nOK"))
 	} else {
 		Print("[!] Unrecognized User-Agent from %s: '%s'. Rejecting.", remoteIP, ua)
-		sendHTTPErrorAndClose(client, 403, "Forbidden", "Forbidden")
+		sendHTTPErrorAndClose(conn, 403, "Forbidden", "Forbidden")
 	}
 }
 
@@ -538,16 +664,13 @@ func (p *Proxy) forwardConnection(client net.Conn, info *ActiveConnInfo, targetA
 		return
 	}
 	defer targetConn.Close()
-
 	if tcpTargetConn, ok := targetConn.(*net.TCPConn); ok {
 		tcpTargetConn.SetKeepAlive(true)
 		tcpTargetConn.SetKeepAlivePeriod(30 * time.Second)
 	}
-
 	if len(initialData) > 0 {
 		targetConn.Write(initialData)
 	}
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go p.pipeTraffic(&wg, targetConn, client, info, true)
@@ -555,7 +678,7 @@ func (p *Proxy) forwardConnection(client net.Conn, info *ActiveConnInfo, targetA
 	wg.Wait()
 }
 
-func (p *Proxy) forwardDirectTCP(client net.Conn, reader *bufio.Reader, info *ActiveConnInfo) {
+func (p *Proxy) forwardDirectTCP(client net.Conn, info *ActiveConnInfo) {
 	targetAddr := fmt.Sprintf("%s:%d", p.cfg.Settings.DefaultTargetHost, p.cfg.Settings.DefaultTargetPort)
 	Print("[*] Tunneling %s -> %s for Direct TCP", info.IP, targetAddr)
 	targetConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
@@ -564,7 +687,6 @@ func (p *Proxy) forwardDirectTCP(client net.Conn, reader *bufio.Reader, info *Ac
 		return
 	}
 	defer targetConn.Close()
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go p.pipeTraffic(&wg, targetConn, client, info, true)
@@ -572,57 +694,25 @@ func (p *Proxy) forwardDirectTCP(client net.Conn, reader *bufio.Reader, info *Ac
 	wg.Wait()
 }
 
-type copyTracker struct {
-	io.Writer
-	ConnInfo       *ActiveConnInfo
-	IsUpload       bool
-	DeviceUsagePtr *int64
-}
-
-func (c *copyTracker) Write(p []byte) (n int, err error) {
-	n, err = c.Writer.Write(p)
-	if n > 0 {
-		if c.IsUpload {
-			atomic.AddInt64(&globalBytesSent, int64(n))
-			atomic.AddInt64(&c.ConnInfo.BytesSent, int64(n))
-		} else {
-			atomic.AddInt64(&globalBytesReceived, int64(n))
-			atomic.AddInt64(&c.ConnInfo.BytesReceived, int64(n))
-		}
-		if c.ConnInfo.Credential != "" && c.DeviceUsagePtr != nil {
-			atomic.AddInt64(c.DeviceUsagePtr, int64(n))
-		}
-		atomic.StoreInt64(&c.ConnInfo.LastActive, time.Now().Unix())
-	}
-	return
-}
-
 func (p *Proxy) pipeTraffic(wg *sync.WaitGroup, dst, src net.Conn, info *ActiveConnInfo, isUpload bool) {
 	defer wg.Done()
-
 	var deviceUsagePtr *int64
 	if info.Credential != "" {
 		if val, ok := deviceUsage.Load(info.Credential); ok {
 			deviceUsagePtr = val.(*int64)
 		}
 	}
-
-	tracker := &copyTracker{
-		Writer:         dst,
-		ConnInfo:       info,
-		IsUpload:       isUpload,
-		DeviceUsagePtr: deviceUsagePtr,
-	}
-
+	tracker := &copyTracker{Writer: dst, ConnInfo: info, IsUpload: isUpload, DeviceUsagePtr: deviceUsagePtr}
 	bufPtr := getBuf(p.cfg.Settings.BufferSize)
 	defer putBuf(bufPtr)
-
 	io.CopyBuffer(tracker, src, *bufPtr)
-
 	if tcpConn, ok := dst.(*net.TCPConn); ok {
 		tcpConn.CloseWrite()
 	}
 }
+// ==========================================================
+// --- Main 函数与周期性任务 (Main & Periodic Tasks) ---
+// ==========================================================
 
 func main() {
 	go func() {
@@ -643,7 +733,6 @@ func main() {
 		Print("[!] FATAL: login.html not found: %v", err)
 		os.Exit(1)
 	}
-
 	Print("[*] WSTunnel-Go starting...")
 	cfg := GetConfig()
 	initPools(cfg.Settings.BufferSize)
@@ -679,7 +768,6 @@ func main() {
 	adminMux.Handle("/device/", authMiddleware(adminPostHandler))
 	adminMux.Handle("/account/", authMiddleware(adminPostHandler))
 	adminMux.Handle("/settings/", authMiddleware(adminPostHandler))
-
 	adminServer := &http.Server{Addr: cfg.Settings.AdminListenAddr, Handler: adminMux}
 	go func() {
 		Print("[*] Status on http://%s", cfg.Settings.AdminListenAddr)
@@ -687,40 +775,43 @@ func main() {
 			log.Fatalf("[!] admin server failed: %v", err)
 		}
 	}()
-
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
 	<-sigs
 	Print("[*] Shutdown requested...")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	adminServer.Shutdown(ctx)
 	proxy.Stop()
-
 	Print("[*] Shutdown complete.")
 }
 
+func runPeriodicTasks() {
+	saveTicker := time.NewTicker(5 * time.Second)
+	go func() {
+		for range saveTicker.C {
+			saveDeviceUsage()
+		}
+	}()
+	statusTicker := time.NewTicker(2 * time.Second)
+	go func() {
+		for range statusTicker.C {
+			collectSystemStatus()
+		}
+	}()
+	auditTicker := time.NewTicker(15 * time.Second)
+	go func() {
+		for range auditTicker.C {
+			auditActiveConnections()
+		}
+	}()
+}
+
+
 // ==========================================================
-// --- 所有保留的辅助函数和 Web 后台逻辑 ---
+// --- Web后台业务逻辑 (Web Panel Business Logic) ---
 // ==========================================================
 
-func InitMetrics() {
-	cfg := GetConfig()
-	devices := cfg.GetDeviceIDs()
-	for id, info := range devices {
-		newUsage := info.UsedBytes
-		deviceUsage.Store(id, &newUsage)
-	}
-}
-func AddActiveConn(key string, conn *ActiveConnInfo) { activeConns.Store(key, conn) }
-func RemoveActiveConn(key string)                 { activeConns.Delete(key) }
-func GetActiveConn(key string) (*ActiveConnInfo, bool) {
-	if val, ok := activeConns.Load(key); ok {
-		return val.(*ActiveConnInfo), true
-	}
-	return nil, false
-}
 func auditActiveConnections() {
 	cfg := GetConfig()
 	settings := cfg.GetSettings()
@@ -771,7 +862,7 @@ func auditActiveConnections() {
 				return true
 			}
 		} else {
-			if connInfo.Status == "活跃" {
+			if connInfo.Status == "活跃" && connInfo.DeviceID != "Direct TCP" {
 				Print("[-] [审计] 踢出无凭证的活跃连接 (IP: %s)", connInfo.IP)
 				connInfo.Writer.Close()
 				return true
@@ -779,26 +870,6 @@ func auditActiveConnections() {
 		}
 		return true
 	})
-}
-func runPeriodicTasks() {
-	saveTicker := time.NewTicker(5 * time.Second)
-	go func() {
-		for range saveTicker.C {
-			saveDeviceUsage()
-		}
-	}()
-	statusTicker := time.NewTicker(2 * time.Second)
-	go func() {
-		for range statusTicker.C {
-			collectSystemStatus()
-		}
-	}()
-	auditTicker := time.NewTicker(15 * time.Second)
-	go func() {
-		for range auditTicker.C {
-			auditActiveConnections()
-		}
-	}()
 }
 func saveDeviceUsage() {
 	cfg := GetConfig()
@@ -843,47 +914,6 @@ func collectSystemStatus() {
 	}
 	systemStatus.BytesSent = atomic.LoadInt64(&globalBytesSent)
 	systemStatus.BytesReceived = atomic.LoadInt64(&globalBytesReceived)
-}
-func sendHTTPErrorAndClose(conn net.Conn, statusCode int, statusText string, body string) {
-	response := fmt.Sprintf("HTTP/1.1 %d %s\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\n\r\n%s",
-		statusCode, statusText, len(body), body)
-	_, _ = conn.Write([]byte(response))
-	conn.Close()
-}
-func hashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	return string(bytes), err
-}
-func checkPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
-}
-func extractHeaderValue(text, name string) string {
-	re := regexp.MustCompile(fmt.Sprintf(`(?mi)^%s:\s*(.+)$`, regexp.QuoteMeta(name)))
-	m := re.FindStringSubmatch(text)
-	if len(m) > 1 {
-		return strings.TrimSpace(m[1])
-	}
-	return ""
-}
-func isIPInList(ip string, list []string) bool {
-	for _, item := range list {
-		if item == ip {
-			return true
-		}
-	}
-	return false
-}
-func runCommand(command string, args ...string) (bool, string) {
-	cmd := exec.Command(command, args...)
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if err != nil {
-		return false, fmt.Sprintf("Command '%s %s' failed: %v, Stderr: %s", command, strings.Join(args, " "), err, stderr.String())
-	}
-	return true, out.String()
 }
 func manageSshUser(username, password, action string) (bool, string) {
 	if os.Geteuid() != 0 {
@@ -986,18 +1016,6 @@ func manageSshUser(username, password, action string) (bool, string) {
 	}
 	return false, "未知操作。"
 }
-
-const sessionCookieName = "wstunnel_session"
-type Session struct {
-	Username string
-	Expiry   time.Time
-}
-
-var (
-	sessions     = make(map[string]Session)
-	sessionsLock sync.RWMutex
-)
-
 func authMiddleware(next http.Handler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		isAPIRequest := strings.HasPrefix(r.URL.Path, "/api/")
@@ -1078,39 +1096,6 @@ func logoutHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", MaxAge: -1, SameSite: http.SameSiteLaxMode})
 	w.WriteHeader(http.StatusOK)
 }
-func sendJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_, _ = w.Write(response)
-}
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-type APIConnectionResponse struct {
-	DeviceID     string `json:"device_id"`
-	Status       string `json:"status"`
-	SentStr      string `json:"sent_str"`
-	RcvdStr      string `json:"rcvd_str"`
-	SpeedStr     string `json:"speed_str"`
-	RemainingStr string `json:"remaining_str"`
-	Expiry       string `json:"expiry"`
-	IP           string `json:"ip"`
-	FirstConn    string `json:"first_conn"`
-	LastActive   string `json:"last_active"`
-	ConnKey      string `json:"conn_key"`
-}
-
 func handleAPI(w http.ResponseWriter, r *http.Request) {
 	cfg := GetConfig()
 	var reqData map[string]interface{}
@@ -1128,7 +1113,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			return true
 		})
 		sort.Slice(conns, func(i, j int) bool {
-			statusOrder := map[string]int{"活跃": 0, "握手": 1}
+			statusOrder := map[string]int{"活跃": 0, "握手": 1, "TLS握手": 1, "HTTP握手": 1}
 			if statusOrder[conns[i].Status] != statusOrder[conns[j].Status] {
 				return statusOrder[conns[i].Status] < statusOrder[conns[j].Status]
 			}
@@ -1225,6 +1210,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": fmt.Sprintf("Device ID 验证已%s", statusText)})
 		}
+
 	case "/api/server/restart":
 		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "服务正在重启..."})
 		go func() {
@@ -1239,6 +1225,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			os.Exit(0)
 		}()
+
 	case "/api/ssh/create", "/api/ssh/delete":
 		action := filepath.Base(r.URL.Path)
 		username, _ := reqData["username"].(string)
@@ -1381,22 +1368,53 @@ func handleAdminPost(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "账号密码已更新，请重新登录！"})
 		}
 	case "/settings/save":
-		// This needs to be adapted for ListenAddrs, but for now we keep it simple to avoid breaking frontend
 		var newSettings Settings
 		settingsBytes, _ := json.Marshal(reqData)
 		_ = json.Unmarshal(settingsBytes, &newSettings)
+
 		cfg.lock.Lock()
+		isRestartNeeded := !compareStringSlices(cfg.Settings.ListenAddrs, newSettings.ListenAddrs) ||
+			cfg.Settings.AdminListenAddr != newSettings.AdminListenAddr
+
 		cfg.Settings = newSettings
 		cfg.lock.Unlock()
+
 		if err := cfg.SafeSave(); err != nil {
 			sendJSON(w, http.StatusInternalServerError, map[string]string{"status": "error", "message": fmt.Sprintf("保存失败: %v", err)})
 			return
 		}
-		sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存！请注意：端口更改需要重启服务才能生效。"})
+		if isRestartNeeded {
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "端口设置已更改, 服务正在重启..."})
+			go func() {
+				time.Sleep(1 * time.Second)
+				Print("[*] Port settings changed. Restarting server...")
+				executable, _ := os.Executable()
+				cmd := exec.Command(executable, os.Args[1:]...)
+				cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+				if err := cmd.Start(); err != nil {
+					Print("[!] FATAL: Failed to restart process after manual trigger: %v", err)
+					os.Exit(1)
+				}
+				os.Exit(0)
+			}()
+		} else {
+			Print("[*] Settings updated and hot-reloaded successfully.")
+			sendJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "设置已保存并热加载成功！"})
+		}
+	default:
+		http.NotFound(w, r)
 	}
 }
-func randomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+func compareStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sort.Strings(a)
+	sort.Strings(b)
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
