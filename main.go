@@ -534,7 +534,7 @@ func (p *Proxy) handleConn(client net.Conn) {
 	}
 	AddActiveConn(connKey, info)
 	defer func() {
-		removeActiveConn(connKey)
+		RemoveActiveConn(connKey)
 		client.Close()
 		Print("[-] Conn %s closed for %s", connKey, remoteIP)
 	}()
