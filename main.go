@@ -29,13 +29,12 @@ import (
 )
 
 // ==========================================================
-// --- 1. 配置与结构体定义 (现代化架构) ---
+// --- 1. 配置与结构体定义 (现代化架构) ---new
 // ==========================================================
 
 const ConfigFile = "ws_config.json"
 const logBufferSize = 200
 
-// --- 配置文件结构 (已升级) ---
 type Settings struct {
 	ListenAddrs                  []string `json:"listen_addrs"`
 	AdminListenAddr              string   `json:"admin_listen_addr"`
@@ -74,7 +73,6 @@ type Config struct {
 	lock      sync.RWMutex          `json:"-"`
 }
 
-// --- 核心 Proxy 结构体 (全新) ---
 type Proxy struct {
 	cfg           *Config
 	ctx           context.Context
@@ -85,16 +83,13 @@ type Proxy struct {
 	deviceUsage   sync.Map
 	tlsConfig     *tls.Config
 	connSemaphore chan struct{}
-
 	globalBytesSent     int64
 	globalBytesReceived int64
-
 	logBuffer    *RingBuffer
 	systemStatus SystemStatus
 	statusMutex  sync.RWMutex
 }
 
-// --- 连接信息结构 (沿用并微调) ---
 type ActiveConnInfo struct {
 	mu                     sync.RWMutex
 	conn                   net.Conn
@@ -124,20 +119,15 @@ type SystemStatus struct {
 	BytesReceived string  `json:"bytes_received"`
 }
 
-// --- 日志与工具函数 ---
 var bufferPool sync.Pool
 
 func initBufferPool(size int) {
-	if size <= 0 {
-		size = 32 * 1024
-	}
+	if size <= 0 { size = 32 * 1024 }
 	bufferPool = sync.Pool{New: func() interface{} { return make([]byte, size) }}
 }
 func getBuf(size int) []byte {
 	b := bufferPool.Get().([]byte)
-	if cap(b) < size {
-		return make([]byte, size)
-	}
+	if cap(b) < size { return make([]byte, size) }
 	return b[:size]
 }
 func putBuf(b []byte) { bufferPool.Put(b) }
@@ -165,13 +155,9 @@ func (rb *RingBuffer) GetLogs() []string {
 	var logs []string
 	for i := 0; i < len(rb.buffer); i++ {
 		idx := (rb.head + i) % len(rb.buffer)
-		if rb.buffer[idx] != "" {
-			logs = append(logs, rb.buffer[idx])
-		}
+		if rb.buffer[idx] != "" { logs = append(logs, rb.buffer[idx]) }
 	}
-	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 {
-		logs[i], logs[j] = logs[j], logs[i]
-	}
+	for i, j := 0, len(logs)-1; i < j; i, j = i+1, j-1 { logs[i], logs[j] = logs[j], logs[i] }
 	return logs
 }
 
@@ -179,7 +165,6 @@ func (p *Proxy) Print(format string, v ...interface{}) {
 	p.logBuffer.Add(fmt.Sprintf(format, v...))
 }
 
-// --- 配置加载与保存 (已升级) ---
 func defaultConfig() *Config {
 	return &Config{
 		Settings: Settings{
@@ -208,32 +193,22 @@ func (c *Config) SaveAtomic() error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	tmp := ConfigFile + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
+	if err := os.WriteFile(tmp, data, 0644); err != nil { return err }
 	return os.Rename(tmp, ConfigFile)
 }
 
 func LoadConfig() (*Config, error) {
 	if _, err := os.Stat(ConfigFile); os.IsNotExist(err) {
 		cfg := defaultConfig()
-		if err := cfg.SaveAtomic(); err != nil {
-			return nil, err
-		}
+		if err := cfg.SaveAtomic(); err != nil { return nil, err }
 		return cfg, nil
 	}
 	data, err := os.ReadFile(ConfigFile)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
 	cfg := &Config{}
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, err
-	}
+	if err := json.Unmarshal(data, cfg); err != nil { return nil, err }
 	return cfg, nil
 }
 // ==========================================================
@@ -435,7 +410,9 @@ func (p *Proxy) handleTLSConnection(conn net.Conn, reader *bufio.Reader) {
 func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
-	ctx, cancel := context.WithCancel(p.ctx)
+	
+    // ############ 修正点 1 ############
+	_, cancel := context.WithCancel(p.ctx)
 	defer cancel()
 
 	connInfo := &ActiveConnInfo{
@@ -459,7 +436,9 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 	for !handshakeComplete {
 		conn.SetReadDeadline(time.Now().Add(handshakeTimeout))
 		req, err := http.ReadRequest(reader)
-		if err != nil { return }
+		if err != nil {
+			return
+		}
 
 		var headerBuilder strings.Builder
 		req.Header.Write(&headerBuilder)
@@ -526,7 +505,9 @@ func (p *Proxy) handleHTTPPayloadConnection(conn net.Conn, reader *bufio.Reader)
 func (p *Proxy) handleDirectConnection(conn net.Conn, reader *bufio.Reader) {
 	remoteIP, _, _ := net.SplitHostPort(conn.RemoteAddr().String())
 	connKey := fmt.Sprintf("%s-%d", remoteIP, time.Now().UnixNano())
-	ctx, cancel := context.WithCancel(p.ctx)
+	
+    // ############ 修正点 2 ############
+	_, cancel := context.WithCancel(p.ctx)
 	defer cancel()
 
 	connInfo := &ActiveConnInfo{
@@ -583,13 +564,6 @@ func (p *Proxy) forwardToTarget(clientConn net.Conn, clientReader io.Reader, con
 			return
 		}
 	}
-
-	// 修正: 移除此处的 ctx, cancel
-	// go func() {
-	// 	<-ctx.Done() // <-- ctx 未在此处定义
-	// 	clientConn.Close()
-	// 	targetConn.Close()
-	// }()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -738,7 +712,6 @@ func (p *Proxy) collectSystemStatus() {
 		BytesReceived: formatBytes(atomic.LoadInt64(&p.globalBytesReceived)),
 	}
 }
-
 func (p *Proxy) AddActiveConn(key string, conn *ActiveConnInfo) { p.conns.Store(key, conn) }
 func (p *Proxy) RemoveActiveConn(key string)                 { p.conns.Delete(key) }
 
@@ -769,7 +742,7 @@ func (p *Proxy) handleAPIConnections(w http.ResponseWriter, r *http.Request) {
 		c.mu.RUnlock()
 
 		bytesSent, bytesReceived := atomic.LoadInt64(&c.bytesSent), atomic.LoadInt64(&c.bytesReceived)
-		
+
 		if status == "活跃" {
 			if timeDelta := now.Sub(c.lastSpeedUpdateTime).Seconds(); timeDelta >= 2 {
 				currentTotalBytes := bytesSent + bytesReceived
@@ -780,10 +753,10 @@ func (p *Proxy) handleAPIConnections(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		resp = append(resp, APIConnectionResponse{
-			DeviceID:     deviceID, Status: status, Protocol: protocol, SentStr: formatBytes(bytesSent),
-			RcvdStr:      formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.currentSpeedBps))),
-			IP:           ip, FirstConn: firstConn.Format("15:04:05"),
-			LastActive:   time.Unix(atomic.LoadInt64(&c.lastActive), 0).Format("15:04:05"), ConnKey: connKey,
+			DeviceID:   deviceID, Status: status, Protocol: protocol, SentStr: formatBytes(bytesSent),
+			RcvdStr:    formatBytes(bytesReceived), SpeedStr: fmt.Sprintf("%s/s", formatBytes(int64(c.currentSpeedBps))),
+			IP:         ip, FirstConn: firstConn.Format("15:04:05"),
+			LastActive: time.Unix(atomic.LoadInt64(&c.lastActive), 0).Format("15:04:05"), ConnKey: connKey,
 		})
 	}
 	sendJSON(w, http.StatusOK, resp)
@@ -796,7 +769,6 @@ func (p *Proxy) handleAPIServerStatus(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleAPILogs(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, p.logBuffer.GetLogs())
 }
-// ... (其他API处理器可以在此添加) ...
 
 // --- Web 面板与 Main ---
 var adminPanelHTML, loginPanelHTML []byte
@@ -827,7 +799,6 @@ func main() {
 		adminMux.HandleFunc("/api/connections", proxy.handleAPIConnections)
 		adminMux.HandleFunc("/api/server_status", proxy.handleAPIServerStatus)
 		adminMux.HandleFunc("/api/logs", proxy.handleAPILogs)
-		// ... (注册所有API和管理后台的handler)
 	}
 
 	adminServer := &http.Server{Addr: cfg.Settings.AdminListenAddr, Handler: adminMux}
